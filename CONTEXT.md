@@ -2,7 +2,7 @@
 
 ## Project goal and scope
 
-Watch Gmail for promotion emails from user-chosen sender domains containing user-chosen keywords, and push a phone notification. MVP is single-user; the design must allow future non-tech users via per-copy deployment. No implementation code exists yet; planning is complete through the T2 spec.
+Watch Gmail for promotion emails from user-chosen senders (domain or full email address) containing user-chosen keywords, and push a phone notification. MVP is single-user; the design must allow future non-tech users via per-copy deployment. No implementation code exists yet; planning is complete through the T2 spec.
 
 ## Current architecture and data flow
 
@@ -25,15 +25,15 @@ Google Apps Script (bound to the template Sheet), GmailApp + SpreadsheetApp + Pr
 
 ## Components and responsibilities
 
-- Telegram UI: reply keyboard, guided Q&A, inline per-rule buttons, power-user slash commands; the only surface the user touches daily.
+- Telegram UI: reply keyboard, guided Q&A, inline per-rule buttons, power-user slash commands; the only surface the user touches daily. Add-rule keywords step offers `[Use last keywords]` (hidden when no prior rule exists); it fills keywords from the most recently created rule for confirm/edit.
 - Apps Script: Gmail polling/matching/digest, `doPost` command + callback router, per-chat conversation state, setup/transfer/connect flows, suggestion flow.
 - Hidden Sheet DB: `Rules`, `Log`, `Runs` tables.
 - `ScriptProperties`: secrets + owner binding + rules cache. No other backend, server, or dependency.
 
 ## Data/storage structure
 
-- `Rules`: `id` (stable, not a row number) `| domain | keywords (OR, comma) | enabled | topic_hint | updated_at`. One entry per domain; domain is the natural key.
-- `Log`: `timestamp | message_id | domain | matched_keywords | subject | status`.
+- `Rules`: `id` (stable, not a row number) `| sender | keywords (OR, comma) | enabled | topic_hint | updated_at`. One entry per sender; sender is the natural key. Sender is either a domain (`xxx.com`) or a full email (`abc@xxx.com`), distinguished by presence of `@`.
+- `Log`: `timestamp | message_id | sender | matched_keywords | subject | status`. `Log` rows are preserved on rule delete for dedup and audit.
 - `Runs`: `start | end | found | sent | error` (watcher self-monitoring).
 - Secrets (never in Sheet/code/repo/logs): `bot_token | owner_chat_id | setup_token (single-use) | openrouter_key | llm_model | webhook_secret`.
 
@@ -54,9 +54,9 @@ Google Apps Script (bound to the template Sheet), GmailApp + SpreadsheetApp + Pr
 
 ## Matching and notification behaviour
 
-- Domain contains; keywords OR + case-insensitive normalized substring (`lower/trim/full-half-width`), `"quoted"` spans are exact phrases.
+- Sender scope: domain senders use contains; email senders use exact match after sender normalization (`lower` + strip `+tag`, e.g. `Abc+sale@XXX.com` matches `abc@xxx.com`); Gmail dot handling is out of scope. Keywords OR + case-insensitive normalized substring (`lower/trim/full-half-width`), `"quoted"` spans are exact phrases.
 - Two-stage: subject + snippet first, `getPlainBody()` only for candidates; merged `from:{...}` query with `newer_than:{2×interval}h` overlap; `message_id` dedup.
-- One digest message per run (zero matches = silence); no caps, no quiet hours; one email appears once per digest with matched keywords, no row/ID references; errors pushed separately in English.
+- One digest message per run (zero matches = silence); no caps, no quiet hours; one email appears once per digest with the union of matched keywords across rules, no row/ID references; errors pushed separately in English.
 
 ## Security/secrets handling
 

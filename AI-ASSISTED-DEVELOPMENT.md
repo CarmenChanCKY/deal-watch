@@ -139,6 +139,34 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **Result.** Secret-handling rules recorded as implementation constraints for all future code.
 
+## 11. Listening to full email addresses
+
+**Problem.** Owner wants to watch not only whole domains (`xxx.com`) but also specific senders (`abc@xxx.com`).
+
+**Options considered.** Domain-only senders; sender column accepting either a domain or a full email (distinguished by presence of `@`).
+
+**How AI was used.** Used AI (`grill-me` interview) to probe exact-match vs contains, case, `+tag`, Gmail dot handling, and the interaction when one rule watches `abc@xxx.com` and another watches `xxx.com`.
+
+**Decision.** One entry per sender; sender is either a domain or a full email. Domain senders use contains; email senders use exact match after sender normalization (`lower` + strip `+tag`, e.g. `Abc+sale@XXX.com` matches `abc@xxx.com`); Gmail dot handling out of scope. No search-layer exclusion: merged `from:{...}` query searches all senders, per-rule sender + keyword checks run in script, `message_id` dedup merges multi-rule hits into one digest entry with the union of matched keywords. `Log` rows are preserved on rule delete for dedup and audit.
+
+**Why.** Covers specific-sender promos; dedup-after-match avoids missing fallback hits (e.g. `abc@xxx.com` with only the domain rule's keyword still notifies via the domain rule).
+
+**Result.** `Rules.sender` / `Log.sender` replace domain-only fields; matching spec updated in `CONTEXT.md`.
+
+## 12. Reusing keywords when adding a rule
+
+**Problem.** Owner did not want to retype the same keywords when adding another sender.
+
+**Options considered.** Retyping keywords for every rule; per-rule copy with a convenience fill.
+
+**How AI was used.** AI surfaced the retyping pain and scoped the minimal fill behavior (what "last" means, hidden state).
+
+**Decision.** Add-rule keywords step offers `[Use last keywords]` (hidden when no prior rule exists); it fills keywords from the most recently created rule for confirm/edit. Each rule keeps its own copied keywords afterward.
+
+**Why.** Removes retyping with no storage-model change.
+
+**Result.** Button-first convenience recorded as a UI constraint for T5; storage stays one-row-per-sender.
+
 ## Ownership
 
 AI acted as reviewer and options-generator throughout. Every trade-off above — channel, runtime, storage, matching semantics, digest shape, LLM fencing, and secret handling — was decided by the owner against AI-surfaced alternatives, and the rejections are recorded with reasons so future sessions don't relitigate them.

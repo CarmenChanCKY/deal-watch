@@ -3,6 +3,7 @@
 ## Project context
 
 Extended context and project facts: see [CONTEXT.md](CONTEXT.md).
+Thinking process and decision history (problems, options, why): see [AI-ASSISTED-DEVELOPMENT.md](AI-ASSISTED-DEVELOPMENT.md).
 
 ## Collaboration rules (IMPORTANT)
 
@@ -28,10 +29,3 @@ After making changes:
 - Do not run linting or type checking unless explicitly requested.
 - Instead, provide clear instructions on how the user can test and verify the changes thwmselves.
 - Include the relevant commands, test steps, and expected results when applicable.
-
-
-## Stack
-
-
-## Repository structure
-
