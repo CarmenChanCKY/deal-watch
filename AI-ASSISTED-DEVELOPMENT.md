@@ -167,6 +167,90 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **Result.** Button-first convenience recorded as a UI constraint for T5; storage stays one-row-per-sender.
 
+## 13. Auto-provisioning template tables
+
+**Problem.** If the template is shared on GitHub, future users should not have to manually create the 3 tables and rules.
+
+**Options considered.** Manual table creation by each user; static header spec/CSVs to import; code-generated provisioning on first run.
+
+**How AI was used.** AI pointed out the already-locked startup DB check could be extended to first-run provisioning, and clarified the split: AI can generate the provisioning code but cannot create the Drive file itself (external action).
+
+**Decision.** Blank template + idempotent `ensureSchema()` that creates/hides `Rules`/`Log`/`Runs`; no example rule row — examples live in the Telegram welcome/add-rule prompts; rules are added via Telegram UI only, never by hand-editing the Sheet.
+
+**Why.** Removes manual work with no storage-model change and keeps the Sheet as a hidden DB plus debug fallback.
+
+**Result.** Recorded as a T3 constraint; manual table/rule creation by end users rejected.
+
+## 14. Onboarding and distribution for a GitHub template
+
+**Problem.** Owner will publish the template on GitHub with uncertain adoption, and wants minimal friction for non-tech users from link to first rule.
+
+**Options considered.** Showing the copy link inside Telegram vs outside; Sheet-menu Setup vs Telegram-only setup; guide in README vs a static site.
+
+**How AI was used.** AI clarified the chicken-and-egg (a user's own bot does not exist until after copy/deploy, so the copy link must live outside Telegram) and that OAuth consent, Web App deploy, and trigger creation require a one-time Google UI pass — even a standalone script without a Sheet still needs one Google open.
+
+**Decision.** Keep one-bot-per-user Telegram; distribute the `.../copy` link via `README.md` plus a bilingual simple static site `docs/index.html` (GitHub Pages, placeholder links until the owner supplies real URLs). Flow: copy template -> one-time Sheet `Setup` (OAuth + paste `bot_token` + Deploy once) -> Telegram `/start <token>` bind -> add rules. The Sheet menu is the bound Sheet's custom menu beside Help on desktop browser.
+
+**Why.** Closest to one-stop achievable under per-copy isolation; a separate guide page keeps the README concise.
+
+**Result.** Recorded as the T5/T7 plan; owner approved with plain HTML, bilingual text, and placeholders.
+
+## 15. Quota-driven trigger and batching review (second grill round)
+
+**Problem.** The 10-min default and single merged query had no quota grounding: too many senders could blow up query length or exceed Apps Script limits.
+
+**Options considered.** Keep 10-min; move to 15-min default; free-type interval vs fixed dropdown (`15/30/60min + 2/6/12hr`); single merged search vs batched searches; hard sender cap vs unbounded; 5-min trigger; non-standard steps (20/25min, 45/75min, 23hr sliding).
+
+**How AI was used.** AI looked up 2026 quotas (6 min/execution for consumer and Workspace; 90 min/day consumer trigger budget, 6 hr/day Workspace) and computed per-run budgets: 10-min = 144 runs/day (`<37s` avg), 15-min = 96 runs/day (`<56s` avg), 5-min = 288 runs/day (`<18s` avg).
+
+**Decision.** Default 15 min; fixed dropdown `15/30/60min + 2/6/12hr` (min 15 min, max 12 hr, no free type); max 30 senders with 15 per query (max 2 searches/run); cross-batch `message_id` dedup; 5-min trigger rejected; 20/25min, 45/75min, and 23hr sliding rejected as non-native (skip-counter logic + oversized `newer_than` windows for little latency benefit).
+
+**Why.** Fixed native intervals need no validation or skip logic; 15-min gives headroom inside the daily budget; batching bounds query length and keeps each run to a couple of searches.
+
+**Result.** Recorded in `CONTEXT.md` as the T3/T4 polling constraint.
+
+## 16. Log retention vs never re-push
+
+**Problem.** Keeping `Log` rows forever prevents re-push on re-add but grows the Sheet unboundedly (10 rules × 5 mails × 144 runs/day); deleting on rule delete saves space but re-pushes old mail inside the `newer_than` window.
+
+**Options considered.** Keep forever; delete-with-rule; sliding retention with auto-prune.
+
+**How AI was used.** AI laid out the dedup-window vs audit-history trade-off and asked the owner to pick the priority.
+
+**Decision.** Owner picked never-re-push first: sliding 30-day retention. `Rules` rows are untouched; `Log` rows (including those of deleted rules) are pruned only when older than 30 days.
+
+**Why.** Dedup only needs to cover the `newer_than` window (minutes to hours); 30 days is ample while bounding Sheet growth. `/export` stays out of scope.
+
+**Result.** Recorded in `CONTEXT.md` as the `Log` retention constraint.
+
+## 17. Rules cache as a per-key map
+
+**Problem.** A single-blob rules cache risks single-value size limits and all-or-nothing rebuilds when a Sheet tab is deleted.
+
+**Options considered.** Single JSON blob; one `rule_<id>` key per rule plus `rules_version`/`updated_at`; Sheet as source of truth vs Properties as source of truth.
+
+**How AI was used.** AI explained `ScriptProperties` as a per-script KV store (like a JS `Map`, not in the Sheet or repo) and proposed per-key storage; the owner confirmed the mental model.
+
+**Decision.** One `rule_<id>` key per rule + `rules_version`/`updated_at`, latest version only, overwritten on every rule change; Sheet stays the mirror/debug fallback; startup check rebuilds missing tables per key.
+
+**Why.** Avoids single-value truncation, makes rebuilds granular, and keeps the Sheet as the human-readable mirror.
+
+**Result.** Recorded in `CONTEXT.md` under `ScriptProperties` and file-deletion mitigation.
+
+## 18. Send-failure fallback, idempotent Setup, and digest mute
+
+**Problem.** Second grill round surfaced three gaps: Telegram send failure = silent death (error push uses the same broken channel); re-running `Setup` could duplicate triggers or break binding; uncapped digests with no quiet hours could buzz at night.
+
+**Options considered.** Sheet `Runs` + `last_error` with re-push on next success vs no fallback; `getMe` token validation vs none; stop-after-N-failures vs retry forever; idempotent `Setup` (`Already set up`) vs run-once assumption; digest caps/quiet hours vs user-side mute.
+
+**How AI was used.** AI proposed each fallback and asked the owner to approve; the owner approved the fallback/idempotence items and dismissed caps/quiet hours.
+
+**Decision.** Send failures are logged to `Runs` + `last_error` in Properties, re-pushed on the next successful send, with retry stopped after N consecutive failures and `getMe` validation in `Setup`. `Setup` is idempotent: no duplicate triggers, no owner overwrite, no secret rotation. Digest stays uncapped with no quiet hours; the owner mutes the phone.
+
+**Why.** There is no external fallback under per-copy isolation, so the Sheet plus next-success re-push is the cheapest reliable signal; idempotence prevents double polling and broken bindings at negligible cost.
+
+**Result.** Recorded in `CONTEXT.md` as T4/T5 constraints.
+
 ## Ownership
 
 AI acted as reviewer and options-generator throughout. Every trade-off above — channel, runtime, storage, matching semantics, digest shape, LLM fencing, and secret handling — was decided by the owner against AI-surfaced alternatives, and the rejections are recorded with reasons so future sessions don't relitigate them.

@@ -1,77 +1,182 @@
 # Deal Watch — Context
 
-## Project goal and scope
+## Goal and status
 
-Watch Gmail for promotion emails from user-chosen senders (domain or full email address) containing user-chosen keywords, and push a phone notification. MVP is single-user; the design must allow future non-tech users via per-copy deployment. No implementation code exists yet; planning is complete through the T2 spec.
+Watch Gmail for promotion emails from user-chosen senders (domain or full email) containing user-chosen keywords, and push a phone notification.
 
-## Current architecture and data flow
+MVP is single-user; future non-tech users via per-copy deployment.
 
-Planned architecture (not implemented yet):
+No code, tests, or deployment yet; T2 spec done, T3–T8 planned (see Build plan).
+
+Architecture below is the intended design unless the user changes it.
+Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
+
+## Architecture, stack and integrations
+
+Flow:
 
 Telegram (button-first UI, DM only)
-↔ user's bound Apps Script
+↔ bound Apps Script
 ↔ hidden Sheet DB
 ↔ Gmail
 → Telegram Bot API
 → phone
 
-The project currently has no implementation code. The architecture is defined in the planning/specification documents and should be treated as the current intended design unless the user explicitly changes it.
+No other backend, server, or dependency.
 
-Unless explicitly asked to reconsider the architecture, do not replace or simplify locked decisions based only on personal preference. If an implementation issue conflicts with a locked decision, explain the conflict before changing it.
+Stack:
 
-## Tech stack and runtime
+- Runtime: Apps Script bound to the template Sheet (`GmailApp` + `SpreadsheetApp` + `PropertiesService` + `CacheService` + `UrlFetchApp`).
+- Trigger: time-driven, default 15 min, fixed options `15/30/60min + 2/6/12hr` (min 15 min, max 12 hr).
+- Telegram: inbound (webhook + `secret_token`) and outbound (`sendMessage`, `deleteMessage`, `setWebhook`, `getMe` for token validation, `getUpdates` for initial `chat_id`).
+- Gmail: read via the owner's account, server-side `GmailApp.search()` only.
+- OpenRouter `/chat/completions`: optional, suggestion-only.
+- BotFather bot creation is manual user action, never done by AI.
 
-Google Apps Script (bound to the template Sheet), GmailApp + SpreadsheetApp + PropertiesService + CacheService + UrlFetchApp; time-driven trigger (default 10 min, user-editable); Telegram Bot API inbound (webhook + `secret_token`) and outbound; OpenRouter chat-completions API (optional).
+## Telegram UX, Setup and onboarding
 
-## Components and responsibilities
+- UI:
+  - Reply keyboard, guided Q&A, inline per-rule buttons, power-user slash commands.
+  - The only surface touched daily.
+  - Button-first; raw commands are fallback only; free-text control rejected.
+  - Add-rule keywords step offers `[Use last keywords]` (hidden when no prior rule exists), filling keywords from the most recently created rule for confirm/edit.
 
-- Telegram UI: reply keyboard, guided Q&A, inline per-rule buttons, power-user slash commands; the only surface the user touches daily. Add-rule keywords step offers `[Use last keywords]` (hidden when no prior rule exists); it fills keywords from the most recently created rule for confirm/edit.
-- Apps Script: Gmail polling/matching/digest, `doPost` command + callback router, per-chat conversation state, setup/transfer/connect flows, suggestion flow.
-- Hidden Sheet DB: `Rules`, `Log`, `Runs` tables.
-- `ScriptProperties`: secrets + owner binding + rules cache. No other backend, server, or dependency.
+- Access:
+  - Single owner, DM-only.
+  - Deep-link `/start <one-time token>` binding.
+  - Non-owners silently ignored; groups rejected.
 
-## Data/storage structure
+- Script:
+  - Gmail polling / matching / digest.
+  - `doPost` command + callback router.
+  - Per-chat conversation state.
+  - Setup / transfer / connect and suggestion flows.
 
-- `Rules`: `id` (stable, not a row number) `| sender | keywords (OR, comma) | enabled | topic_hint | updated_at`. One entry per sender; sender is the natural key. Sender is either a domain (`xxx.com`) or a full email (`abc@xxx.com`), distinguished by presence of `@`.
-- `Log`: `timestamp | message_id | sender | matched_keywords | subject | status`. `Log` rows are preserved on rule delete for dedup and audit.
-- `Runs`: `start | end | found | sent | error` (watcher self-monitoring).
-- Secrets (never in Sheet/code/repo/logs): `bot_token | owner_chat_id | setup_token (single-use) | openrouter_key | llm_model | webhook_secret`.
+- Setup is idempotent per deployment:
+  - `ensureSchema()` + trigger creation (no duplicates) + `getMe` token validation + `setWebhook` + binding-link generation.
+  - Rerun outputs `Already set up` without overwriting owner or rotating secrets.
+  - Phone change = no action; TG-account change = `/transfer`; token rotation = `/connect`.
+  - Rules persist because storage is decoupled from Telegram identity.
 
-## External APIs and integrations
+- Onboarding is one-time Google Setup + rest-in-Telegram:
+  - Copy template via `.../copy` link.
+  - Then `Deal Watch > Setup` (OAuth + paste `bot_token` + Deploy Web App once).
+  - Then Telegram `/start <token>` bind.
+  - Telegram-only setup is impossible (OAuth consent, Web App deploy, trigger creation require Google UI).
 
-- Gmail (read via the owner's account; server-side `GmailApp.search()` only).
-- Telegram Bot API (`sendMessage`, `deleteMessage`, `setWebhook`, `getUpdates` for initial `chat_id`).
-- BotFather (manual bot creation; user action, never done by AI).
-- OpenRouter (`/chat/completions` with user-supplied model/key; suggestion calls only).
+- Distribution:
+  - `copy` link + setup guide live in `README.md` and bilingual static site `docs/index.html` (GitHub Pages, placeholder links until owner supplies real URLs).
+  - The copy link is never shown inside Telegram (own bot does not exist until after copy/deploy).
 
-## Key implementation decisions and constraints
+## Data and storage
 
-- Button-first UX; raw commands are fallback only; free-text natural-language control rejected.
-- Single owner, DM-only, deep-link `/start <one-time token>` binding; non-owners silently ignored; groups rejected.
-- Setup runs once per deployment; phone change = no action; TG-account change = `/transfer`; token rotation = `/connect`; rules persist because storage is decoupled from Telegram identity.
-- File deletion cannot be forbidden; mitigation is startup DB check + `ScriptProperties` cache rebuild + file-hygiene guidance. `/export` is out of scope.
-- Keep `CONTEXT.md`/`README.md` clean and concise; AI writes docs only when asked; external actions (bot creation, OAuth, API keys) are the user's job.
+- `Rules`:
+  - `id` (stable, not a row number) `| sender | keywords (OR, comma) | enabled | topic_hint | updated_at`.
+  - One entry per sender; sender is the natural key.
+  - Sender is either a domain (`xxx.com`) or a full email (`abc@xxx.com`), distinguished by presence of `@`.
 
-## Matching and notification behaviour
+- `Log`:
+  - `timestamp | message_id | sender | matched_keywords | subject | status`.
+  - Sliding 30-day retention; rows kept after rule delete for dedup and audit, then pruned.
+  - `/export` is out of scope.
 
-- Sender scope: domain senders use contains; email senders use exact match after sender normalization (`lower` + strip `+tag`, e.g. `Abc+sale@XXX.com` matches `abc@xxx.com`); Gmail dot handling is out of scope. Keywords OR + case-insensitive normalized substring (`lower/trim/full-half-width`), `"quoted"` spans are exact phrases.
-- Two-stage: subject + snippet first, `getPlainBody()` only for candidates; merged `from:{...}` query with `newer_than:{2×interval}h` overlap; `message_id` dedup.
-- One digest message per run (zero matches = silence); no caps, no quiet hours; one email appears once per digest with the union of matched keywords across rules, no row/ID references; errors pushed separately in English.
+- `Runs`:
+  - `start | end | found | sent | error` (watcher self-monitoring).
 
-## Security/secrets handling
+- `ScriptProperties`:
+  - Secrets + owner binding + `last_error` + rules cache.
+  - Cache is one `rule_<id>` key per rule + `rules_version`/`updated_at`, latest version only; Sheet is the mirror.
 
-Per-copy isolation: each user deploys their own copy, so keys stay in their own account and the template author cannot see them. Entry via own-bot DM (`/setkey`, `/setmodel`), masked echo, immediate `deleteMessage`, DM-only. Code must never log, echo, or persist full keys; audit for exfiltration. `llm_model`/key blank = suggestion disabled with a pricing warning; no default model.
+- Secrets (never in Sheet/code/repo/logs):
+  - `bot_token | owner_chat_id | setup_token (single-use) | openrouter_key | llm_model | webhook_secret`.
 
-## Development status
+- Provisioning:
+  - Tables auto-provisioned by idempotent `ensureSchema()` (then hidden).
+  - No example rule row — examples live in the Telegram welcome/add-rule prompts.
+  - Users never create tables manually.
+  - File deletion cannot be forbidden; mitigation is startup DB check + per-key `ScriptProperties` rebuild (`rule_<id>`) + file-hygiene guidance.
 
-Planning complete through T2; no source files, no tests, nothing deployed. Next: T3 `Code.gs` core (only after explicit user approval), then T4 trigger, T5 UX, optional T6 suggestion, T7 self-verification guide.
+## Matching and notification
+
+- Sender scope:
+  - Domain senders use contains.
+  - Email senders use exact match after normalization (`lower` + strip `+tag`, e.g. `Abc+sale@XXX.com` matches `abc@xxx.com`).
+  - Gmail dot handling is out of scope.
+
+- Keywords:
+  - OR + case-insensitive normalized substring (`lower/trim/full-half-width`).
+  - `"quoted"` spans are exact phrases.
+
+- Polling:
+  - Subject + snippet first, `getPlainBody()` only for candidates.
+  - Batched `from:{...}` queries (max 30 senders, 15 per query, max 2 searches/run) with `newer_than:{2×interval}h` overlap.
+  - Cross-batch `message_id` dedup; capped threads per run.
+
+- Notify:
+  - One digest message per run (zero matches = silence).
+  - No caps, no quiet hours (user mutes phone).
+  - One email appears once per digest with the union of matched keywords across rules, no row/ID references.
+  - Errors pushed separately in English: send failures logged to `Runs` + `last_error`, missed errors re-pushed on next successful send, retry stops after N consecutive failures.
+
+## Security, secrets and AI boundaries
+
+- Per-copy isolation:
+  - Each user deploys their own copy, so keys stay in their own account and the template author cannot see them.
+
+- Secret entry:
+  - Via own-bot DM (`/setkey`, `/setmodel`).
+  - Masked echo, immediate `deleteMessage`, DM-only.
+  - Code must never log, echo, or persist full keys; audit for exfiltration.
+  - `llm_model`/key blank = suggestion disabled with pricing warning; no default model.
+
+- OpenRouter fence:
+  - Keyword suggestion from an explicit user seed only.
+  - On-demand, cost-gated, cached, human-picked, never automatic.
+  - Must never read email content, perform matching, parse commands, or modify rules.
+  - Missing key/model disables cleanly without affecting notifications.
+
+- AI rules:
+  - AI writes docs only when asked; keep `CONTEXT.md`/`README.md` clean and concise.
+  - External actions (bot creation, OAuth, API keys) are the user's job.
+
+## Build plan
+
+- T1 — Manual prerequisites (user, AI never does):
+  BotFather `/newbot` for `bot_token`; optional OpenRouter key/model; Google account ready.
+
+- T2 — Spec (done):
+  Schema, sender/keyword semantics, one-digest-per-run, per-copy isolation.
+
+- T3 — `Code.gs` core (needs explicit approval):
+  Polling, matching, digest assembly per above.
+
+- T4 — Trigger + self-monitoring:
+  Trigger options + `Runs`/error pushes per above.
+
+- T5 — Telegram UX + one-time Setup:
+  Flows per above.
+
+- T6 — Suggestion (optional):
+  Fenced OpenRouter seed-only flow per above.
+
+- T7 — Static site + README:
+  Bilingual `docs/index.html` + minimal README with `copy` link; BotFather -> copy -> Setup -> bind guide.
+
+- T8 — Self-verification (user):
+  Add rule -> test mail -> digest -> error/transfer check; AI provides steps only, never runs app/tests.
 
 ## Explicitly rejected (with reasons)
 
-- No-code automations (cost/privacy); self-hosted service (maintenance); external DB (overkill); `ScriptProperties`-only rules (size/debug limits).
-- Word-boundary matching (meaningless for Chinese); regex now (Phase 2); per-email LLM classification (per-message cost/latency).
-- Precise `after:timestamp` checkpoints (Gmail search lacks timestamp precision); per-message pushes (spam); centrally shared bot (host could read keys); free-text bot parsing (fragile + needs LLM); auto suggestion (cost).
-
-## AI boundaries
-
-OpenRouter is fenced to keyword suggestion from an explicit user seed: on-demand, cost-gated, cached, human-picked, never automatic. It must never read email content, perform matching, parse commands, or modify rules. Missing key/model must disable the feature cleanly without affecting notifications.
+- No-code automations (cost/privacy).
+- Self-hosted service (maintenance).
+- External DB (overkill).
+- `ScriptProperties`-only rules (size/debug limits).
+- Word-boundary matching (meaningless for Chinese).
+- Regex now (Phase 2).
+- Per-email LLM classification (per-message cost/latency).
+- Precise `after:timestamp` checkpoints (Gmail search lacks timestamp precision).
+- Per-message pushes (spam).
+- Centrally shared bot (host could read keys).
+- Free-text bot parsing (fragile + needs LLM).
+- Auto suggestion (cost).
+- Manual table/rule creation by end users (replaced by `ensureSchema()` + Telegram UI).
