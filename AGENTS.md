@@ -15,7 +15,13 @@ Thinking process and decision history (problems, options, why): see [AI-ASSISTED
 - Scope: AI is responsible for coding only. If external actions are required (e.g. applying for API keys, creating accounts, configuring external services), do not perform them — inform the user and wait for them to provide the result.
 - Clarification-first: If any requirement, context, or instruction is unclear or ambiguous, stop and ask the user instead of guessing or assuming.
 - Small incremental tasks with confirmation: Break all work into small tasks, where each task delivers one independently verifiable outcome with a clear done criterion. After completing each task, pause and wait for explicit user confirmation before continuing.
-- Keep [CONTEXT.md](CONTEXT.md) and [README.md](README.md) clean and concise.
+- Keep [CONTEXT.md](CONTEXT.md), [AI-ASSISTED-DEVELOPMENT.md](AI-ASSISTED-DEVELOPMENT.md) and [README.md](README.md) clean and concise.
+- [AI-ASSISTED-DEVELOPMENT.md](AI-ASSISTED-DEVELOPMENT.md) is append-only: add new entries for new work; never modify, rewrite, or delete previously recorded entries.
+- After code generation, briefly explain in chat what code was added, what it does, and why it was added.
+
+### Coding style
+
+- In `.gs` files, prefer `const` / `let` for variable declarations. Use `var` only as a last resort.
 
 ### Testing
 

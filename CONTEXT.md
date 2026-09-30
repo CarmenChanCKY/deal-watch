@@ -6,7 +6,7 @@ Watch Gmail for promotion emails from user-chosen senders (domain or full email)
 
 MVP is single-user; future non-tech users via per-copy deployment.
 
-No code, tests, or deployment yet; T2 spec done, T3–T8 planned (see Build plan).
+T3-a helpers done (`src/Code.gs`); T3-b–T3-d then T4–T8 planned (see Build plan). No tests or deployment yet.
 
 Architecture below is the intended design unless the user changes it.
 Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
@@ -108,14 +108,14 @@ Stack:
   - `"quoted"` spans are exact phrases.
 
 - Polling:
-  - Subject + snippet first, `getPlainBody()` only for candidates.
-  - Batched `from:{...}` queries (max 30 senders, 15 per query, max 2 searches/run) with `newer_than:{2×interval}h` overlap.
-  - Cross-batch `message_id` dedup; capped threads per run.
+  - Sender match = candidate; `getPlainBody()` for all candidates (subject/snippet display-only, never filter, so body-only keywords not missed). `Log` `message_id` check before body read.
+  - Batched `from:{...}` queries (max 30 senders enforced at rule entry, 15 per query, max 2 searches/run; T3 defensive truncate + `Runs` error) with `newer_than:{2×interval}` overlap (`m` unit, e.g. 15min→`30m`).
+  - Cross-batch `message_id` dedup; cap 20 threads/run (overflow covered by overlap next run). Match per-message (`From` `<email>`, own sent ignored), digest collapsed per-thread (union keywords, newest subject/date/link).
 
 - Notify:
   - One digest message per run (zero matches = silence).
   - No caps, no quiet hours (user mutes phone).
-  - One email appears once per digest with the union of matched keywords across rules, no row/ID references.
+  - One thread appears once per digest with the union of matched keywords across rules and messages, plus subject/date/thread link (`.../#inbox/{threadId}`), no row/ID references.
   - Errors pushed separately in English: send failures logged to `Runs` + `last_error`, missed errors re-pushed on next successful send, retry stops after N consecutive failures.
 
 ## Security, secrets and AI boundaries
@@ -147,8 +147,11 @@ Stack:
 - T2 — Spec (done):
   Schema, sender/keyword semantics, one-digest-per-run, per-copy isolation.
 
-- T3 — `Code.gs` core (needs explicit approval):
-  Polling, matching, digest assembly per above.
+- T3 — `Code.gs` core (sliced; confirm each before next; no `sendMessage`, send is T4/T5):
+  - T3-a (done): helpers in `src/Code.gs` — `ensureSchema()`, normalization (`normalizeText`, `+tag` strip), `senderMatches`, `parseKeywords`/`matchKeywordsInText`, interval helpers (Properties read, 15 fallback, `newer_than` = 2x).
+  - T3-b: polling + per-message match — load enabled rules; batched `from:{...}` (15/query, max 2 searches/run, `newer_than:{2×}m`); cross-batch `message_id` dedup; `Log` check before `getPlainBody()`; own sent ignored; 20-thread cap; >30 senders truncate + `Runs` error.
+  - T3-c: digest + writes — per-thread collapse (union keywords, newest subject/date/link); one digest string per run (silence on zero); `Log`/`Runs` writes; 30-day `Log` prune; main entry returns digest without sending.
+  - T3-d: `src/appsscript.json` — `Asia/Hong_Kong`, V8, webapp (`USER_DEPLOYING` + `ANYONE_ANONYMOUS`), 5 minimal scopes (`spreadsheets.currentonly`, `gmail.readonly`, `script.storage`, `script.scriptapp`, `script.external_request`); default GCP project, no editors. Done = auth screen shows exactly these.
 
 - T4 — Trigger + self-monitoring:
   Trigger options + `Runs`/error pushes per above.

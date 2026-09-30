@@ -1,6 +1,18 @@
 # AI-Assisted Development Record
 
-How AI was used as an engineering assistant during the design of Deal Watch. AI explored alternatives, challenged assumptions, and surfaced edge cases; all final decisions were made by the project owner. No implementation code exists yet — this record covers the design phase only.
+How AI was used as an engineering assistant during the design of Deal Watch.
+
+AI explored alternatives, challenged assumptions, and surfaced edge cases; all final decisions were made by the project owner.
+
+No implementation code exists yet — this record covers the design phase only.
+
+## Ownership
+
+AI acted as reviewer and options-generator throughout.
+
+Every trade-off above — channel, runtime, storage, matching semantics, digest shape, LLM fencing, and secret handling — was decided by the owner against AI-surfaced alternatives.
+
+The rejections are recorded with reasons so future sessions don't relitigate them.
 
 ## 1. Choosing the notification approach
 
@@ -66,9 +78,18 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **How AI was used.** Used AI to enumerate the semantics of each method and probe them against the owner's examples (mixed English/Chinese promo text).
 
-**Decision.** Domain-contains sender scope; keyword OR; case-insensitive normalized substring (`lower/trim/full-half-width`); `"quoted"` spans reserved for exact phrases; subject + snippet screened first, body fetched only for candidates.
+**Decision.**
 
-**Why.** Deterministic, cheap, and auditable per run. Word-boundary matching was rejected as meaningless for Chinese; regex deferred to a power-user phase.
+- Domain-contains sender scope; keyword OR.
+- Case-insensitive normalized substring (`lower/trim/full-half-width`).
+- `"quoted"` spans reserved for exact phrases.
+- Subject + snippet screened first, body fetched only for candidates.
+
+**Why.**
+
+Deterministic, cheap, and auditable per run.
+
+Word-boundary matching was rejected as meaningless for Chinese; regex deferred to a power-user phase.
 
 **Result.** Matching behavior is fully specified without any model call in the hot path.
 
@@ -92,9 +113,17 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **How AI was used.** AI helped scope the feature down to a cost-bounded interaction: seed-required, cost-gated, cached, human-confirmed.
 
-**Decision.** Suggestion fires only on explicit request (`[Need ideas?]` after the user types at least one seed word, or `/suggest <seed>`), sends only the seed to OpenRouter, and writes nothing until the user picks items.
+**Decision.**
 
-**Why.** Bounds cost to one call per request (with 24h seed caching), avoids exfiltrating mail content, and keeps a human in the loop so bad suggestions never silently become rules.
+- Fires only on explicit request (`[Need ideas?]` after at least one seed word, or `/suggest <seed>`).
+- Sends only the seed to OpenRouter.
+- Writes nothing until the user picks items.
+
+**Why.**
+
+One call per request (with 24h seed caching).
+
+Avoids exfiltrating mail content, and keeps a human in the loop so bad suggestions never silently become rules.
 
 **Result.** Fenced integration: OpenRouter is allowed only here, never for matching, parsing, or rule writes; blank key/model disables it cleanly.
 
@@ -102,11 +131,17 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **Problem.** Rules mix English and Chinese (`air`, `5折`, `優惠`); matching must handle both.
 
-**How AI was used.** AI probing showed word-boundary semantics break down for Chinese (no word delimiters) and that Gmail search tokenization differs between the two languages, so keyword filtering could not safely live inside the Gmail query.
+**How AI was used.** AI probing showed word-boundary semantics break down for Chinese (no word delimiters), and Gmail search tokenization differs between the two languages.
 
-**Decision.** Gmail query filters only domain + time; all keyword matching happens in script code on normalized text; minimum-seed-length validation was dropped after review showed it was unworkable for single-character Chinese seeds — partial seeds of any length are accepted with a confirm/edit step before spending on a suggestion call.
+So keyword filtering could not safely live inside the Gmail query.
 
-**Why.** Keeps Chinese matching reliable (substring always hits) at the price of occasional English over-match, which the owner accepted as preferable to silent misses.
+**Decision.**
+
+- Gmail query filters only domain + time; all keyword matching happens in script code on normalized text.
+- Dropped minimum-seed-length validation — unworkable for single-character Chinese seeds.
+- Partial seeds of any length are accepted, with a confirm/edit step before spending on a suggestion call.
+
+**Why.** Keeps Chinese matching reliable (substring always hits) at the price of occasional English over-match, accepted as preferable to silent misses.
 
 **Result.** Two-stage pipeline plus normalization rules recorded in the matching spec.
 
@@ -117,11 +152,17 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 **How AI was used.** Ran a structured adversarial review (`grill-me` skill) against the plan and worked through each finding.
 
 **Decisions and reasons.**
-- Silent watcher failure → added `Runs` table plus separate English error pushes, because the most dangerous failure is believing "no deals" when the watcher is broken.
-- Digest spam from multi-match runs → one digest message per run instead of one push per email.
-- Same email matching several rules → listed once with all matched keywords.
-- Sheet deletion (which Google cannot forbid) → startup DB check, cache-backed rebuild, and hygiene guidance instead of a prevention mechanism that doesn't exist.
-- Bot abuse → single-owner allowlist, DM-only, webhook secret, silent ignore for strangers.
+
+- **Silent watcher failure.**
+  Added `Runs` table plus separate English error pushes — the most dangerous failure is believing "no deals" when the watcher is broken.
+- **Digest spam from multi-match runs.**
+  One digest message per run instead of one push per email.
+- **Same email matching several rules.**
+  Listed once with all matched keywords.
+- **Sheet deletion (which Google cannot forbid).**
+  Startup DB check, cache-backed rebuild, and hygiene guidance instead of a prevention mechanism that doesn't exist.
+- **Bot abuse.**
+  Single-owner allowlist, DM-only, webhook secret, silent ignore for strangers.
 
 **Result.** Each finding became a locked constraint or a schema addition before any code was written.
 
@@ -133,7 +174,11 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **How AI was used.** Used AI to compare the trust properties: only per-copy storage gives a technical (not policy-based) guarantee the author cannot read keys.
 
-**Decision.** Keys live only in the user's own `ScriptProperties`, entered via own-bot DM (`/setkey`, `/setmodel`), echoed masked, followed by `deleteMessage`; code must never log, echo, or persist full keys.
+**Decision.**
+
+- Keys live only in the user's own `ScriptProperties`, entered via own-bot DM (`/setkey`, `/setmodel`).
+- Echoed masked, followed by `deleteMessage`.
+- Code must never log, echo, or persist full keys.
 
 **Why.** Combined with per-copy deployment, isolation is structural: there is no shared database or log sink where keys could accumulate.
 
@@ -147,7 +192,14 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **How AI was used.** Used AI (`grill-me` interview) to probe exact-match vs contains, case, `+tag`, Gmail dot handling, and the interaction when one rule watches `abc@xxx.com` and another watches `xxx.com`.
 
-**Decision.** One entry per sender; sender is either a domain or a full email. Domain senders use contains; email senders use exact match after sender normalization (`lower` + strip `+tag`, e.g. `Abc+sale@XXX.com` matches `abc@xxx.com`); Gmail dot handling out of scope. No search-layer exclusion: merged `from:{...}` query searches all senders, per-rule sender + keyword checks run in script, `message_id` dedup merges multi-rule hits into one digest entry with the union of matched keywords. `Log` rows are preserved on rule delete for dedup and audit.
+**Decision.**
+
+- One entry per sender; sender is either a domain or a full email.
+- Domain senders use contains; email senders use exact match after sender normalization (`lower` + strip `+tag`, e.g. `Abc+sale@XXX.com` matches `abc@xxx.com`).
+- Gmail dot handling out of scope.
+- No search-layer exclusion: merged `from:{...}` query searches all senders.
+- Per-rule sender + keyword checks run in script; `message_id` dedup merges multi-rule hits into one digest entry with the union of matched keywords.
+- `Log` rows are preserved on rule delete for dedup and audit.
 
 **Why.** Covers specific-sender promos; dedup-after-match avoids missing fallback hits (e.g. `abc@xxx.com` with only the domain rule's keyword still notifies via the domain rule).
 
@@ -161,7 +213,11 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **How AI was used.** AI surfaced the retyping pain and scoped the minimal fill behavior (what "last" means, hidden state).
 
-**Decision.** Add-rule keywords step offers `[Use last keywords]` (hidden when no prior rule exists); it fills keywords from the most recently created rule for confirm/edit. Each rule keeps its own copied keywords afterward.
+**Decision.**
+
+- Add-rule keywords step offers `[Use last keywords]` (hidden when no prior rule exists).
+- It fills keywords from the most recently created rule for confirm/edit.
+- Each rule keeps its own copied keywords afterward.
 
 **Why.** Removes retyping with no storage-model change.
 
@@ -173,9 +229,15 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **Options considered.** Manual table creation by each user; static header spec/CSVs to import; code-generated provisioning on first run.
 
-**How AI was used.** AI pointed out the already-locked startup DB check could be extended to first-run provisioning, and clarified the split: AI can generate the provisioning code but cannot create the Drive file itself (external action).
+**How AI was used.** AI pointed out the already-locked startup DB check could be extended to first-run provisioning.
 
-**Decision.** Blank template + idempotent `ensureSchema()` that creates/hides `Rules`/`Log`/`Runs`; no example rule row — examples live in the Telegram welcome/add-rule prompts; rules are added via Telegram UI only, never by hand-editing the Sheet.
+It also clarified the split: AI can generate the provisioning code but cannot create the Drive file itself (external action).
+
+**Decision.**
+
+- Blank template + idempotent `ensureSchema()` that creates/hides `Rules`/`Log`/`Runs`.
+- No example rule row — examples live in the Telegram welcome/add-rule prompts.
+- Rules are added via Telegram UI only, never by hand-editing the Sheet.
 
 **Why.** Removes manual work with no storage-model change and keeps the Sheet as a hidden DB plus debug fallback.
 
@@ -187,9 +249,19 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **Options considered.** Showing the copy link inside Telegram vs outside; Sheet-menu Setup vs Telegram-only setup; guide in README vs a static site.
 
-**How AI was used.** AI clarified the chicken-and-egg (a user's own bot does not exist until after copy/deploy, so the copy link must live outside Telegram) and that OAuth consent, Web App deploy, and trigger creation require a one-time Google UI pass — even a standalone script without a Sheet still needs one Google open.
+**How AI was used.** AI clarified the chicken-and-egg (a user's own bot does not exist until after copy/deploy, so the copy link must live outside Telegram).
 
-**Decision.** Keep one-bot-per-user Telegram; distribute the `.../copy` link via `README.md` plus a bilingual simple static site `docs/index.html` (GitHub Pages, placeholder links until the owner supplies real URLs). Flow: copy template -> one-time Sheet `Setup` (OAuth + paste `bot_token` + Deploy once) -> Telegram `/start <token>` bind -> add rules. The Sheet menu is the bound Sheet's custom menu beside Help on desktop browser.
+OAuth consent, Web App deploy, and trigger creation require a one-time Google UI pass — even a standalone script without a Sheet still needs one Google open.
+
+**Decision.**
+
+- Keep one-bot-per-user Telegram; distribute the `.../copy` link via `README.md` plus a bilingual static site `docs/index.html` (GitHub Pages, placeholder links until the owner supplies real URLs).
+- Flow:
+  1. copy template
+  2. one-time Sheet `Setup` (OAuth + paste `bot_token` + Deploy once)
+  3. Telegram `/start <token>` bind
+  4. add rules.
+- The Sheet menu is the bound Sheet's custom menu beside Help on desktop browser.
 
 **Why.** Closest to one-stop achievable under per-copy isolation; a separate guide page keeps the README concise.
 
@@ -197,29 +269,54 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 ## 15. Quota-driven trigger and batching review (second grill round)
 
-**Problem.** The 10-min default and single merged query had no quota grounding: too many senders could blow up query length or exceed Apps Script limits.
+**Problem.** The 10-min default and single merged query had no quota grounding.
 
-**Options considered.** Keep 10-min; move to 15-min default; free-type interval vs fixed dropdown (`15/30/60min + 2/6/12hr`); single merged search vs batched searches; hard sender cap vs unbounded; 5-min trigger; non-standard steps (20/25min, 45/75min, 23hr sliding).
+Too many senders could blow up query length or exceed Apps Script limits.
 
-**How AI was used.** AI looked up 2026 quotas (6 min/execution for consumer and Workspace; 90 min/day consumer trigger budget, 6 hr/day Workspace) and computed per-run budgets: 10-min = 144 runs/day (`<37s` avg), 15-min = 96 runs/day (`<56s` avg), 5-min = 288 runs/day (`<18s` avg).
+**Options considered.**
 
-**Decision.** Default 15 min; fixed dropdown `15/30/60min + 2/6/12hr` (min 15 min, max 12 hr, no free type); max 30 senders with 15 per query (max 2 searches/run); cross-batch `message_id` dedup; 5-min trigger rejected; 20/25min, 45/75min, and 23hr sliding rejected as non-native (skip-counter logic + oversized `newer_than` windows for little latency benefit).
+- Keep 10-min; move to 15-min default.
+- Free-type interval vs fixed dropdown (`15/30/60min + 2/6/12hr`).
+- Single merged search vs batched searches.
+- Hard sender cap vs unbounded.
+- 5-min trigger.
+- Non-standard steps (20/25min, 45/75min, 23hr sliding).
 
-**Why.** Fixed native intervals need no validation or skip logic; 15-min gives headroom inside the daily budget; batching bounds query length and keeps each run to a couple of searches.
+**How AI was used.** AI looked up 2026 quotas (6 min/execution for consumer and Workspace; 90 min/day consumer trigger budget, 6 hr/day Workspace).
+
+Per-run budgets: 10-min = 144 runs/day (`<37s` avg), 15-min = 96 runs/day (`<56s` avg), 5-min = 288 runs/day (`<18s` avg).
+
+**Decision.**
+
+- Default 15 min; fixed dropdown `15/30/60min + 2/6/12hr` (min 15 min, max 12 hr, no free type).
+- Max 30 senders with 15 per query (max 2 searches/run); cross-batch `message_id` dedup.
+- Rejected: 5-min trigger; 20/25min, 45/75min, and 23hr sliding as non-native (skip-counter logic + oversized `newer_than` windows for little latency benefit).
+
+**Why.** Fixed native intervals need no validation or skip logic.
+
+15-min gives headroom inside the daily budget; batching bounds query length and keeps each run to a couple of searches.
 
 **Result.** Recorded in `CONTEXT.md` as the T3/T4 polling constraint.
 
 ## 16. Log retention vs never re-push
 
-**Problem.** Keeping `Log` rows forever prevents re-push on re-add but grows the Sheet unboundedly (10 rules × 5 mails × 144 runs/day); deleting on rule delete saves space but re-pushes old mail inside the `newer_than` window.
+**Problem.**
+
+- Keeping `Log` rows forever prevents re-push on re-add but grows the Sheet unboundedly (10 rules × 5 mails × 144 runs/day).
+- Deleting on rule delete saves space but re-pushes old mail inside the `newer_than` window.
 
 **Options considered.** Keep forever; delete-with-rule; sliding retention with auto-prune.
 
 **How AI was used.** AI laid out the dedup-window vs audit-history trade-off and asked the owner to pick the priority.
 
-**Decision.** Owner picked never-re-push first: sliding 30-day retention. `Rules` rows are untouched; `Log` rows (including those of deleted rules) are pruned only when older than 30 days.
+**Decision.**
 
-**Why.** Dedup only needs to cover the `newer_than` window (minutes to hours); 30 days is ample while bounding Sheet growth. `/export` stays out of scope.
+- Owner picked never-re-push first: sliding 30-day retention.
+- `Rules` rows are untouched; `Log` rows (including those of deleted rules) are pruned only when older than 30 days.
+
+**Why.** Dedup only needs to cover the `newer_than` window (minutes to hours); 30 days is ample while bounding Sheet growth.
+
+`/export` stays out of scope.
 
 **Result.** Recorded in `CONTEXT.md` as the `Log` retention constraint.
 
@@ -231,7 +328,10 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 **How AI was used.** AI explained `ScriptProperties` as a per-script KV store (like a JS `Map`, not in the Sheet or repo) and proposed per-key storage; the owner confirmed the mental model.
 
-**Decision.** One `rule_<id>` key per rule + `rules_version`/`updated_at`, latest version only, overwritten on every rule change; Sheet stays the mirror/debug fallback; startup check rebuilds missing tables per key.
+**Decision.**
+
+- One `rule_<id>` key per rule + `rules_version`/`updated_at`, latest version only, overwritten on every rule change.
+- Sheet stays the mirror/debug fallback; startup check rebuilds missing tables per key.
 
 **Why.** Avoids single-value truncation, makes rebuilds granular, and keeps the Sheet as the human-readable mirror.
 
@@ -239,18 +339,125 @@ How AI was used as an engineering assistant during the design of Deal Watch. AI 
 
 ## 18. Send-failure fallback, idempotent Setup, and digest mute
 
-**Problem.** Second grill round surfaced three gaps: Telegram send failure = silent death (error push uses the same broken channel); re-running `Setup` could duplicate triggers or break binding; uncapped digests with no quiet hours could buzz at night.
+**Problem.** Second grill round surfaced three gaps:
 
-**Options considered.** Sheet `Runs` + `last_error` with re-push on next success vs no fallback; `getMe` token validation vs none; stop-after-N-failures vs retry forever; idempotent `Setup` (`Already set up`) vs run-once assumption; digest caps/quiet hours vs user-side mute.
+- Telegram send failure = silent death (error push uses the same broken channel).
+- Re-running `Setup` could duplicate triggers or break binding.
+- Uncapped digests with no quiet hours could buzz at night.
 
-**How AI was used.** AI proposed each fallback and asked the owner to approve; the owner approved the fallback/idempotence items and dismissed caps/quiet hours.
+**Options considered.**
 
-**Decision.** Send failures are logged to `Runs` + `last_error` in Properties, re-pushed on the next successful send, with retry stopped after N consecutive failures and `getMe` validation in `Setup`. `Setup` is idempotent: no duplicate triggers, no owner overwrite, no secret rotation. Digest stays uncapped with no quiet hours; the owner mutes the phone.
+- Sheet `Runs` + `last_error` with re-push on next success vs no fallback.
+- `getMe` token validation vs none.
+- Stop-after-N-failures vs retry forever.
+- Idempotent `Setup` (`Already set up`) vs run-once assumption.
+- Digest caps/quiet hours vs user-side mute.
 
-**Why.** There is no external fallback under per-copy isolation, so the Sheet plus next-success re-push is the cheapest reliable signal; idempotence prevents double polling and broken bindings at negligible cost.
+**How AI was used.** AI proposed each fallback and asked the owner to approve.
+
+The owner approved the fallback/idempotence items and dismissed caps/quiet hours.
+
+**Decision.**
+
+- Send failures are logged to `Runs` + `last_error` in Properties, re-pushed on the next successful send, with retry stopped after N consecutive failures and `getMe` validation in `Setup`.
+- `Setup` is idempotent: no duplicate triggers, no owner overwrite, no secret rotation.
+- Digest stays uncapped with no quiet hours; the owner mutes the phone.
+
+**Why.** There is no external fallback under per-copy isolation, so the Sheet plus next-success re-push is the cheapest reliable signal.
+
+Idempotence prevents double polling and broken bindings at negligible cost.
 
 **Result.** Recorded in `CONTEXT.md` as T4/T5 constraints.
 
-## Ownership
+## 19. One bot listening to multiple Gmail accounts
 
-AI acted as reviewer and options-generator throughout. Every trade-off above — channel, runtime, storage, matching semantics, digest shape, LLM fencing, and secret handling — was decided by the owner against AI-surfaced alternatives, and the rejections are recorded with reasons so future sessions don't relitigate them.
+**Problem.** Whether one deployment / one Telegram bot can listen to several Gmail accounts sharing the same rules (one ruleset, merged or shared digest).
+
+**Options considered.**
+
+- Single deployment reading N mailboxes via `GmailApp` or Gmail API under the owner's identity.
+- N deployments sharing one bot token.
+- Single deployment holding N OAuth refresh tokens and polling the Gmail REST API per account (multi-OAuth).
+- Service account with domain-wide delegation.
+- Central backend with Postgres and a single bot.
+- Isolation-preserving workarounds (filtered forwarding into the primary mailbox; one copy + one bot per mailbox).
+
+**How AI was used.** AI checked current platform facts:
+
+- `GmailApp` and the Gmail API under one OAuth identity only see the script owner's mailbox; Gmail UI delegation does not grant API access, and consumer `gmail.com` has no domain-wide-delegation path.
+- Telegram supports only one webhook URL per bot token, so a second `setWebhook` overwrites the first and breaks inbound rule management.
+- AI costed multi-poll against the consumer trigger budget and property-store limits.
+
+**Decision.**
+
+- Rejected as a core feature. The locked shape stays `1 copy : 1 Gmail : 1 bot`.
+- Multi-mailbox stays workaround-only (filtered forward, or N copies + N bots with separate digests) and out of T3–T5 scope.
+- The owner confirmed security is the top priority, which rules out the central-backend and shared-secret-store variants.
+
+**Why.** Three independent blockers, not one missing function:
+
+1. Google identity — one execution identity sees one mailbox, so "just switch API" changes nothing without per-account OAuth grants.
+2. Telegram inbound — outbound `sendMessage` can share a token, but inbound management cannot, so N scripts cannot share one bot UI.
+3. Security — centralizing mail and LLM keys downgrades the guarantee from technical (author cannot see them under per-copy isolation) to policy-based (host promises not to look), which the owner rejected.
+
+Multi-OAuth additionally multiplies runtime against the per-execution and daily trigger budgets and the `ScriptProperties` size limits.
+
+**Result.**
+
+- No schema change (`Rules`/`Log` gain no `account` column), no headless-watcher mode, no `Setup`/`transfer`/`connect` redesign.
+- Multi-account remains documentable as a workaround only.
+
+## 20. T3 core locked through grill (thread collapse, body guarantee, caps)
+
+**Problem.** T3 `Code.gs` core had five gaps before coding: thread vs message counting (reply quotes cause double-match); body-only keywords missed if subject/snippet filters; Amazon-scale senders blowing per-run quota; >30 senders; digest link shape.
+
+**Options considered.** Per-thread one line vs per-message lines; strict (subject/snippet must hit before body read) vs loose (sender match = candidate, always read body); cap 10 vs 20 vs uncapped; block 31st rule at entry vs truncate at poll time; thread link vs message link; `newer_than` in `h` vs `m`.
+
+**How AI was used.** `grill-me` interview forced the trade-offs; owner asked the two load-bearing counter-questions (delete-quote reply; high-volume sender).
+
+**Decision.**
+
+- Match per-message (`From` `<email>`, own sent ignored), display collapsed per-thread: one digest line per thread, union keywords, newest subject/date/link.
+- Loose body: sender match = candidate, always `getPlainBody()`; subject/snippet display-only; `Log` `message_id` check before body read.
+- Cap 20 threads/run (overflow covered by 2x overlap next run).
+- Max 30 senders enforced at rule entry (T5); T3 defensive truncate + `Runs` error.
+- Digest line adds date + thread link (`.../#inbox/{threadId}`).
+- `newer_than:{2×interval}` in `m` unit (e.g. 15min→`30m`).
+
+**Why.** Per-message match avoids false positives on own replies (including delete-quote case) while per-thread display avoids quote-duplicate spam; loose body guarantees no miss on body-only keywords; entry-time cap keeps T3 simple with a safe fallback; 20-cap fits the 6-min execution budget.
+
+**Result.** Recorded in `CONTEXT.md` as T3 polling/notify constraints; T3 code not yet implemented (owner hold).
+
+## 21. T3-a core helpers implemented (Code.gs, no send)
+
+**Problem.** Start T3 `Code.gs` core in small verifiable slices without pulling in T4 (trigger/send) or T5 (Telegram UX) scope.
+
+**Options considered.** One-shot full core vs sliced delivery (helpers → polling → digest); root `Code.gs` vs `src/` folder; hardcoded interval vs Properties-read interval.
+
+**How AI was used.** AI proposed the slice breakdown and scope questions; the owner decided: core without send (Log/Runs writes stay, `sendMessage` deferred to T4/T5), `src/` folder, helpers-first slice, interval from `ScriptProperties` with 15-min fallback.
+
+**Decision.**
+
+- Created `src/Code.gs` with T3-a only: `ensureSchema()` (idempotent, hides `Rules`/`Log`/`Runs`, no example row), normalization (`normalizeText`, `extractEmail`, `normalizeSenderEmail`, `isEmailSender`), sender matching (`senderMatches`: domain-contains, email-exact after `+tag` strip), keyword parsing/matching (`parseKeywords`, `matchKeywordsInText`, `buildNormalizedHaystack`), interval helpers (`getPollIntervalMinutes` with `[15,30,60,120,360,720]` allowlist fallback, `getNewerThanMinutes` = 2x).
+- Deferred to later slices: Gmail search/batching/dedup (T3-b), digest assembly + `Log`/`Runs` writes + 30-day prune (T3-c), Telegram send + trigger options (T4/T5).
+
+**Why.** Helpers are pure logic verifiable by reading against `CONTEXT.md` with no Gmail/Telegram dependency; interval allowlist keeps T3 defensive while T4 owns the dropdown.
+
+**Result.** T3-a done, untested by AI per project rule (owner verifies); awaiting owner confirmation before T3-b.
+
+## 22. Minimal-permission manifest planned
+
+**Problem.** The project's OAuth scopes needed a least-privilege decision before any code uses Gmail/triggers/URL-fetch.
+
+**Options considered.** Default vs standard GCP project; full `spreadsheets` scope vs `spreadsheets.currentonly`; declaring all scopes upfront vs incrementally.
+
+**How AI was used.** `grill-me` review of the permission plan; owner confirmed `Asia/Hong_Kong`, `gmail.readonly`, and default-GCP answers.
+
+**Decision.**
+
+- Manifest locked to 5 scopes (`spreadsheets.currentonly`, `gmail.readonly`, `script.storage`, `script.scriptapp`, `script.external_request`), declared upfront (fail-closed); default GCP project pinned; no editors on script/Sheet.
+- Residual risk accepted: `gmail.readonly` technically reads the whole mailbox (no narrower scope exists); mitigation stays code-level per existing polling constraints.
+
+**Why.** Upfront minimal scopes avoid repeated re-auth and silent privilege growth.
+
+**Result.** Manifest plan recorded; T3-d implementation awaits owner approval.
