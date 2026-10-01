@@ -109,7 +109,7 @@ Stack:
 
 - Polling:
   - Sender match = candidate; `getPlainBody()` for all candidates (subject/snippet display-only, never filter, so body-only keywords not missed). `Log` `message_id` check before body read.
-  - Batched `from:{...}` queries (max 30 senders enforced at rule entry, 15 per query, max 2 searches/run; T3 defensive truncate + `Runs` error) with `newer_than:{2×interval}` overlap (`m` unit, e.g. 15min→`30m`).
+  - Batched `from:{...}` queries (max 30 senders enforced at rule entry, 15 per query, max 2 searches/run; T3 defensive truncate + invalid-sender skip, both counted in `Runs` error) with `newer_than:{2×interval}` overlap (`m` unit, e.g. 15min→`30m`).
   - Cross-batch `message_id` dedup; cap 20 threads/run (overflow covered by overlap next run). Match per-message (`From` `<email>`, own sent ignored), digest collapsed per-thread (union keywords, newest subject/date/link).
 
 - Notify:
@@ -149,7 +149,7 @@ Stack:
 
 - T3 — `Code.gs` core (sliced; confirm each before next; no `sendMessage`, send is T4/T5):
   - T3-a (done): helpers in `src/Code.gs` — `ensureSchema()`, normalization (`normalizeText`, `+tag` strip), `senderMatches`, `parseKeywords`/`matchKeywordsInText`, interval helpers (Properties read, 15 fallback, `newer_than` = 2x).
-  - T3-b: polling + per-message match — load enabled rules; batched `from:{...}` (15/query, max 2 searches/run, `newer_than:{2×}m`); cross-batch `message_id` dedup; `Log` check before `getPlainBody()`; own sent ignored; 20-thread cap; >30 senders truncate + `Runs` error.
+  - T3-b: polling + per-message match — load enabled rules; batched `from:{...}` (15/query, max 2 searches/run, `newer_than:{2×}m`); cross-batch `message_id` dedup; `Log` check before `getPlainBody()`; own sent ignored; 20-thread cap; >30 senders truncate + invalid senders skip, both counted in `Runs` error.
   - T3-c: digest + writes — per-thread collapse (union keywords, newest subject/date/link); one digest string per run (silence on zero); `Log`/`Runs` writes; 30-day `Log` prune; main entry returns digest without sending.
   - T3-d: `src/appsscript.json` — `Asia/Hong_Kong`, V8, webapp (`USER_DEPLOYING` + `ANYONE_ANONYMOUS`), 5 minimal scopes (`spreadsheets.currentonly`, `gmail.readonly`, `script.storage`, `script.scriptapp`, `script.external_request`); default GCP project, no editors. Done = auth screen shows exactly these.
 

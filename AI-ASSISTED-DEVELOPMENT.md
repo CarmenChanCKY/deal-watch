@@ -461,3 +461,17 @@ Multi-OAuth additionally multiplies runtime against the per-execution and daily 
 **Why.** Upfront minimal scopes avoid repeated re-auth and silent privilege growth.
 
 **Result.** Manifest plan recorded; T3-d implementation awaits owner approval.
+
+## 23. Gmail query sender sanitization
+
+**Problem.** Rule senders are concatenated into `from:{...}` queries; a malformed sender (space, `}`, quote, Gmail operator) could break the whole batch of 15 or skew results.
+
+**Options considered.** No validation (T5 entry check only); blocklist-escaping special chars; quoting each sender; strict allowlist + skip.
+
+**How AI was used.** Owner asked whether query injection defense is needed; AI analyzed the threat model (single-owner DM-only input under per-copy isolation: no external attacker, risk is an owner typo breaking their own batch) and the query construction in `src/Code.gs`.
+
+**Decision.** Owner chose skip + `Runs` count: T3 validates sender shape (domain or full email allowlist, ASCII), excludes invalid senders from queries and candidate matching, and counts them in the `Runs` error string. `newer_than` stays numeric-only via `parseInt`. T5 entry validation remains the primary check; T3 is the defensive fallback (same pattern as the >30 truncate).
+
+**Why.** Blocklist escaping and quoting risk changing Gmail match semantics; allowlist-skip keeps queries safe by construction, isolates one bad row, and leaves an auditable count instead of silent loss.
+
+**Result.** Recorded in `CONTEXT.md` polling/T3-b constraints; sanitization slice pending on top of the T3-b base.
