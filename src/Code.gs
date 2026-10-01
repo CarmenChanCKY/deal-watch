@@ -1,10 +1,11 @@
 /**
- * Deal Watch — T3-a core helpers (bound Apps Script).
+ * Deal Watch — T3 core (bound Apps Script).
  *
- * Scope (per user-confirmed T3 slice):
- * - ensureSchema() + normalization + sender/keyword matching + interval helper.
- * - No Gmail search, no digest assembly/sending, no trigger management here.
- *   Those arrive in T3-b (polling) / T3-c (digest + Log/Runs) / T4 (trigger + send).
+ * Scope (per user-confirmed T3 slices):
+ * - T3-a: ensureSchema() + normalization + sender/keyword matching + interval helper.
+ * - T3-b: polling + per-message match (no digest, no Log/Runs writes, no send).
+ * - T3-c: digest collapse + digest string + Log/Runs writes + 30-day prune (no send).
+ *   Telegram send + trigger management arrive in T4/T5.
  *
  * Conventions follow CONTEXT.md:
  * - Rules: id | sender | keywords (OR, comma) | enabled | topic_hint | updated_at
@@ -647,4 +648,303 @@ function pollNewMatches() {
     errorParts.push(skipError);
   }
   return { matches: matches, threadsScanned: threads.length, truncated: built.truncated, totalSenders: built.totalSenders, invalidSkipped: built.invalidSkipped, error: errorParts.join(' ') };
+}
+
+// ---------------------------------------------------------------------------
+// T3-c: digest + writes (no send; T4/T5 own Telegram send)
+// ---------------------------------------------------------------------------
+//
+// Locked per CONTEXT.md:
+// - Match per-message (T3-b), display collapsed per-thread: one digest block
+//   per thread, union keywords, newest subject/date/link.
+// - One digest string per run; zero matches = silence ("").
+// - Log/Runs writes + 30-day Log prune here; main entry returns digest string.
+
+/**
+ * Milliseconds for date comparison. Unparseable dates sort as oldest (0).
+ */
+function toTime_(d) {
+  try {
+    const t = (d instanceof Date) ? d.getTime() : new Date(d).getTime();
+    return isNaN(t) ? 0 : t;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Collapse per-message matches into per-thread groups (pure, no IO).
+ * Preserves first-seen thread order. Each group:
+ * { threadId, subject, date, fromEmail, matchedKeywords, senders, messageCount }
+ * - matchedKeywords: union across messages/rules, first-seen order, deduped
+ *   case-insensitively on the normalized form (display keeps first spelling).
+ * - subject/date/fromEmail: from the newest message in the thread.
+ * - senders: union of rule sender strings that matched in this thread.
+ */
+function collapseMatchesByThread(matches) {
+  const groups = {};
+  const order = [];
+  if (!matches || !matches.length) {
+    return [];
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    if (!m || !m.threadId) {
+      continue;
+    }
+    let g = groups[m.threadId];
+    if (!g) {
+      g = {
+        threadId: m.threadId,
+        subject: m.subject,
+        date: m.date,
+        fromEmail: m.fromEmail,
+        matchedKeywords: [],
+        keywordSeen: {},
+        senders: [],
+        senderSeen: {},
+        messageCount: 0
+      };
+      groups[m.threadId] = g;
+      order.push(m.threadId);
+    }
+    g.messageCount++;
+    if (toTime_(m.date) >= toTime_(g.date)) {
+      g.subject = m.subject;
+      g.date = m.date;
+      g.fromEmail = m.fromEmail;
+    }
+    const kws = m.matchedKeywords || [];
+    for (let k = 0; k < kws.length; k++) {
+      const key = normalizeText(kws[k]);
+      if (!key || g.keywordSeen[key]) {
+        continue;
+      }
+      g.keywordSeen[key] = true;
+      g.matchedKeywords.push(kws[k]);
+    }
+    const snd = m.senders || [];
+    for (let s = 0; s < snd.length; s++) {
+      const sKey = String(snd[s]).replace(/^\s+|\s+$/g, '').toLowerCase();
+      if (!sKey || g.senderSeen[sKey]) {
+        continue;
+      }
+      g.senderSeen[sKey] = true;
+      g.senders.push(snd[s]);
+    }
+  }
+  const out = [];
+  for (let i = 0; i < order.length; i++) {
+    const g = groups[order[i]];
+    out.push({
+      threadId: g.threadId,
+      subject: g.subject,
+      date: g.date,
+      fromEmail: g.fromEmail,
+      matchedKeywords: g.matchedKeywords,
+      senders: g.senders,
+      messageCount: g.messageCount
+    });
+  }
+  return out;
+}
+
+/**
+ * Gmail thread link for digest display.
+ */
+function buildThreadLink_(threadId) {
+  return 'https://mail.google.com/mail/u/0/#inbox/' + threadId;
+}
+
+/**
+ * Format a message date for digest display (script timezone, yyyy-MM-dd HH:mm).
+ * Falls back to "" when unparseable; never throws.
+ */
+function formatRunDate_(d) {
+  try {
+    const date = (d instanceof Date) ? d : new Date(d);
+    if (isNaN(date.getTime())) {
+      return '';
+    }
+    let tz = 'Asia/Hong_Kong';
+    try {
+      tz = Session.getScriptTimeZone() || tz;
+    } catch (e) {
+      // Keep default; Session may be unavailable in some contexts.
+    }
+    return Utilities.formatDate(date, tz, 'yyyy-MM-dd HH:mm');
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Build one digest string per run (pure, no IO).
+ * Zero threads -> "" (silence; T4/T5 must not send).
+ * Otherwise one multi-line block per thread:
+ *   • {subject}
+ *     {date} | {kw1, kw2}
+ *     {thread link}
+ */
+function buildDigestString(collapsedThreads) {
+  if (!collapsedThreads || !collapsedThreads.length) {
+    return '';
+  }
+  const lines = [];
+  lines.push('Deal Watch: ' + collapsedThreads.length + (collapsedThreads.length === 1 ? ' thread' : ' threads') + ' matched');
+  for (let i = 0; i < collapsedThreads.length; i++) {
+    const g = collapsedThreads[i];
+    const subject = String(g.subject === null || g.subject === undefined ? '' : g.subject).replace(/^\s+|\s+$/g, '') || '(no subject)';
+    const dateStr = formatRunDate_(g.date);
+    const kws = (g.matchedKeywords || []).join(', ');
+    lines.push('');
+    lines.push('\u2022 ' + subject);
+    lines.push('  ' + (dateStr ? dateStr + ' | ' : '') + kws);
+    lines.push('  ' + buildThreadLink_(g.threadId));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Append one Log row per matched message.
+ * Columns: timestamp | message_id | sender | matched_keywords | subject | status.
+ * status is always "matched" in T3-c (only matches are logged here).
+ * Returns rows written; never throws (0 on missing sheet/write failure).
+ */
+function appendLogRows_(matches, timestamp) {
+  if (!matches || !matches.length) {
+    return 0;
+  }
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(SHEET_LOG);
+    if (!sheet) {
+      ensureSchema();
+      sheet = ss.getSheetByName(SHEET_LOG);
+    }
+    if (!sheet) {
+      return 0;
+    }
+    const rows = [];
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i];
+      rows.push([
+        timestamp,
+        m.messageId,
+        m.fromEmail || m.from,
+        (m.matchedKeywords || []).join(', '),
+        m.subject,
+        'matched'
+      ]);
+    }
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADERS_LOG.length).setValues(rows);
+    return rows.length;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Append one Runs row per run.
+ * Columns: start | end | found | sent | error.
+ * found = per-message match count; sent = 0 (T3-c never sends; T4/T5 own send).
+ */
+function appendRunsRow_(start, end, found, sent, error) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(SHEET_RUNS);
+    if (!sheet) {
+      ensureSchema();
+      sheet = ss.getSheetByName(SHEET_RUNS);
+    }
+    if (!sheet) {
+      return;
+    }
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS_RUNS.length).setValues([[start, end, found, sent, error || '']]);
+  } catch (e) {
+    // Self-monitoring must never break the run; digest is already built.
+  }
+}
+
+/**
+ * Delete Log rows older than retentionDays (default LOG_RETENTION_DAYS = 30).
+ * Rows of deleted rules are kept until they age out (dedup + audit).
+ * Returns rows deleted; never throws.
+ */
+function pruneLog_(now, retentionDays) {
+  try {
+    const days = retentionDays > 0 ? retentionDays : LOG_RETENTION_DAYS;
+    const base = (now instanceof Date) ? now : new Date(now);
+    if (isNaN(base.getTime())) {
+      return 0;
+    }
+    const cutoff = base.getTime() - days * 24 * 60 * 60 * 1000;
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_LOG);
+    if (!sheet || sheet.getLastRow() < 2) {
+      return 0;
+    }
+    const values = sheet.getDataRange().getValues();
+    if (!values || values.length < 2) {
+      return 0;
+    }
+    let tsIdx = 0;
+    for (let c = 0; c < values[0].length; c++) {
+      if (String(values[0][c]).replace(/^\s+|\s+$/g, '').toLowerCase() === 'timestamp') {
+        tsIdx = c;
+        break;
+      }
+    }
+    let deleted = 0;
+    for (let r = values.length - 1; r >= 1; r--) {
+      const cell = values[r][tsIdx];
+      const t = (cell instanceof Date) ? cell.getTime() : new Date(cell).getTime();
+      if (!isNaN(t) && t < cutoff) {
+        sheet.deleteRow(r + 1);
+        deleted++;
+      }
+    }
+    return deleted;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * T3-c main entry: poll -> collapse -> digest string -> Log/Runs writes + prune.
+ * No Telegram send here (T4/T5 own send). Zero matches -> returns "" (silence).
+ * A Runs row is written on every path (including poll exceptions); sent is
+ * always 0 until T4 sends. Returns the digest string.
+ */
+function runWatchOnce() {
+  const start = new Date();
+  let poll;
+  try {
+    poll = pollNewMatches();
+  } catch (e) {
+    const end = new Date();
+    const msg = e && e.message ? e.message : String(e);
+    appendRunsRow_(start, end, 0, 0, 'Poll failed: ' + msg);
+    return '';
+  }
+  const matches = (poll && poll.matches) || [];
+  const collapsed = collapseMatchesByThread(matches);
+  const digest = buildDigestString(collapsed);
+  let logError = '';
+  if (matches.length) {
+    const wrote = appendLogRows_(matches, start);
+    if (wrote !== matches.length) {
+      logError = 'Log write incomplete (' + wrote + '/' + matches.length + ').';
+    }
+  }
+  pruneLog_(new Date(), LOG_RETENTION_DAYS);
+  const end = new Date();
+  const errorParts = [];
+  if (poll && poll.error) {
+    errorParts.push(poll.error);
+  }
+  if (logError) {
+    errorParts.push(logError);
+  }
+  appendRunsRow_(start, end, matches.length, 0, errorParts.join(' '));
+  return digest;
 }
