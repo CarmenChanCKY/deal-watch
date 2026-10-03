@@ -475,3 +475,40 @@ Multi-OAuth additionally multiplies runtime against the per-execution and daily 
 **Why.** Blocklist escaping and quoting risk changing Gmail match semantics; allowlist-skip keeps queries safe by construction, isolates one bad row, and leaves an auditable count instead of silent loss.
 
 **Result.** Recorded in `CONTEXT.md` polling/T3-b constraints; sanitization slice pending on top of the T3-b base.
+
+## 24. Reusable T3 acceptance tests (checklist + runner)
+
+**Problem.** T3 had code but no repeatable way to verify it; re-running
+from memory risked missed or mistaken steps.
+
+**Options considered.** Markdown checklist only; temporary `Test.gs`
+runner only; local Node automation; both checklist + runner.
+
+**How AI was used.** AI confirmed local automation only covers pure
+helpers (`normalizeText`, `senderMatches`, …) — anything touching
+`SpreadsheetApp`/`GmailApp`/`PropertiesService` needs the bound
+environment, so mocking it locally buys little for the maintenance cost.
+
+**Decision.** Owner chose both, one file per milestone (T3 vs T4 split,
+not per subtask):
+
+- `test/TESTING.md` (English, in-repo): the master flow — prep with exact
+  `Rules` rows and a second-account test-mail recipe (real `From` headers
+  cannot be forged, so a `gmail.com` + full-email rule pair on one mail
+  exercises contains/exact/union), per-subtask boxes with expected results,
+  ordered cleanup. T4–T8 reserved as placeholders.
+- `test/TestT3.gs`: one `runAllT3Checks()` pasted into the editor as a
+  temporary file, run once, deleted after; `PASS/FAIL/SKIP` lines map 1:1
+  to the checklist, with `SKIP` (not fail) for prep-dependent checks on the
+  720-fallback path. Expected writes (`Log`/`Runs`, prune dummy) are part
+  of the design and removed in Cleanup. Never shipped in the template
+  (`test/` is not pushed to Apps Script).
+
+**Why.** The checklist removes memory dependence (every manual click
+spelled out); the runner removes per-function manual runs (the editor Run
+button takes no arguments and hides bare returns). One file per milestone
+keeps each pass one-paste-one-run — splitting per subtask would multiply
+steps and miss risk.
+
+**Result.** T3 verifiable in one repeatable pass; the same pattern applies
+to T4+ runners later.
