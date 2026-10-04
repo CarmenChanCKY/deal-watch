@@ -5,7 +5,8 @@
  * - T3-a: ensureSchema() + normalization + sender/keyword matching + interval helper.
  * - T3-b: polling + per-message match (no digest, no Log/Runs writes, no send).
  * - T3-c: digest collapse + digest string + Log/Runs writes + 30-day prune (no send).
- *   Telegram send + trigger management arrive in T4/T5.
+ * - T4-a: trigger management (ensureTrigger + setPollIntervalMinutes).
+ * - T4-b: one merged send + last_error + stop-after-3 (runWatchAndNotify).
  *
  * Conventions follow CONTEXT.md:
  * - Rules: id | sender | keywords (OR, comma) | enabled | topic_hint | updated_at
@@ -38,6 +39,14 @@ const MAX_THREADS_PER_RUN = 20;
 const LOG_RETENTION_DAYS = 30;
 
 const PROP_POLL_INTERVAL = 'poll_interval_minutes';
+
+const PROP_BOT_TOKEN = 'bot_token';
+const PROP_OWNER_CHAT_ID = 'owner_chat_id';
+const PROP_LAST_ERROR = 'last_error';
+const PROP_CONSECUTIVE_FAILURES = 'consecutive_send_failures';
+
+const MAX_CONSECUTIVE_FAILURES = 3;
+const TELEGRAM_MAX_TEXT = 4000;
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -1046,10 +1055,252 @@ function ensureTrigger() {
 }
 
 /**
- * T4-a stub: time-trigger entry point. Polls and returns the digest string.
- * No Telegram send here (T4-b adds send + last_error + Runs.sent update).
- * Zero matches -> "" (silence; caller must not send).
+ * T4-b: send + self-monitoring (T5 owns inbound UI + Setup).
+ *
+ * Locked per CONTEXT.md:
+ * - One merged sendMessage per run (digest + English error block).
+ * - Zero-match stays silent unless a pending error exists.
+ * - Runs.sent is 0/1 per run (one merged message max).
+ * - Send failures -> Runs + last_error, re-pushed next success,
+ *   retry stops after MAX_CONSECUTIVE_FAILURES (polling continues).
+ * - Code must never log, echo, or persist full keys.
+ */
+
+/**
+ * Pending error carried from previous failed sends ("" when none).
+ */
+function getPendingError_() {
+  try {
+    const v = PropertiesService.getScriptProperties().getProperty(PROP_LAST_ERROR);
+    return v === null || v === undefined ? '' : String(v);
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Consecutive send-failure count (0 when missing/invalid).
+ */
+function getConsecutiveFailures_() {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(PROP_CONSECUTIVE_FAILURES);
+    const n = parseInt(String(raw === null || raw === undefined ? '' : raw), 10);
+    return n > 0 ? n : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Send text to the owner via Telegram Bot API.
+ * Returns { ok, error }: error is English and never contains secrets.
+ * Missing token/chat_id counts as failure (Setup incomplete).
+ */
+function sendTelegramMessage_(text) {
+  let token = '';
+  let chatId = '';
+  try {
+    const props = PropertiesService.getScriptProperties();
+    token = String(props.getProperty(PROP_BOT_TOKEN) || '').replace(/^\s+|\s+$/g, '');
+    chatId = String(props.getProperty(PROP_OWNER_CHAT_ID) || '').replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    return { ok: false, error: 'Cannot read script properties.' };
+  }
+  if (!token) {
+    return { ok: false, error: 'Missing bot_token (Setup incomplete).' };
+  }
+  if (!chatId) {
+    return { ok: false, error: 'Missing owner_chat_id (Setup incomplete).' };
+  }
+  if (!text) {
+    return { ok: false, error: 'Nothing to send.' };
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + token + '/sendMessage',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({ chat_id: chatId, text: text }),
+        muteHttpExceptions: true
+      }
+    );
+    const code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      return { ok: false, error: 'Telegram HTTP ' + code + '.' };
+    }
+    let body = '';
+    try {
+      body = resp.getContentText();
+    } catch (e2) {
+      body = '';
+    }
+    try {
+      const data = JSON.parse(body);
+      if (data && data.ok === true) {
+        return { ok: true, error: '' };
+      }
+      const desc = data && data.description ? String(data.description).substring(0, 200) : 'unknown error';
+      return { ok: false, error: 'Telegram rejected send: ' + desc };
+    } catch (e3) {
+      return { ok: false, error: 'Telegram bad response (HTTP ' + code + ').' };
+    }
+  } catch (e) {
+    // UrlFetchApp messages can echo the request URL, which contains the
+    // token — never return it raw. Redact before surfacing.
+    let msg = e && e.message ? String(e.message) : String(e);
+    if (token) {
+      msg = msg.split(token).join('[redacted]');
+    }
+    return { ok: false, error: 'Send exception: ' + msg.substring(0, 200) };
+  }
+}
+
+/**
+ * Error text of the Runs row just written by runWatchOnce() ("" when none).
+ */
+function readLastRunsError_() {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RUNS);
+    if (!sheet || sheet.getLastRow() < 2) {
+      return '';
+    }
+    const lastRow = sheet.getLastRow();
+    const headers = sheet.getRange(1, 1, 1, HEADERS_RUNS.length).getValues()[0];
+    let errIdx = HEADERS_RUNS.length - 1;
+    for (let c = 0; c < headers.length; c++) {
+      if (String(headers[c]).replace(/^\s+|\s+$/g, '').toLowerCase() === 'error') {
+        errIdx = c;
+        break;
+      }
+    }
+    const v = sheet.getRange(lastRow, errIdx + 1).getValue();
+    return v === null || v === undefined ? '' : String(v);
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Update the Runs row just written: set sent, optionally append to error.
+ * Never throws (self-monitoring must not break the run).
+ */
+function updateLastRunsRow_(sent, errorSuffix) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RUNS);
+    if (!sheet || sheet.getLastRow() < 2) {
+      return;
+    }
+    const lastRow = sheet.getLastRow();
+    const headers = sheet.getRange(1, 1, 1, HEADERS_RUNS.length).getValues()[0];
+    let sentIdx = HEADERS_RUNS.length - 2;
+    let errIdx = HEADERS_RUNS.length - 1;
+    for (let c = 0; c < headers.length; c++) {
+      const key = String(headers[c]).replace(/^\s+|\s+$/g, '').toLowerCase();
+      if (key === 'sent') {
+        sentIdx = c;
+      } else if (key === 'error') {
+        errIdx = c;
+      }
+    }
+    sheet.getRange(lastRow, sentIdx + 1).setValue(sent ? 1 : 0);
+    if (errorSuffix) {
+      const cur = sheet.getRange(lastRow, errIdx + 1).getValue();
+      const curStr = cur === null || cur === undefined ? '' : String(cur);
+      sheet.getRange(lastRow, errIdx + 1).setValue(curStr + (curStr ? ' ' : '') + errorSuffix);
+    }
+  } catch (e) {
+    // Ignore: digest is already built and logged.
+  }
+}
+
+/**
+ * Build one merged message (pure, no IO).
+ * Digest (any language) + English error block; "" when nothing to send.
+ */
+function buildMergedMessage_(digest, errorParts) {
+  const d = digest === null || digest === undefined ? '' : String(digest);
+  const errs = [];
+  if (errorParts && errorParts.length) {
+    for (let i = 0; i < errorParts.length; i++) {
+      const e = String(errorParts[i] === null || errorParts[i] === undefined ? '' : errorParts[i]).replace(/^\s+|\s+$/g, '');
+      if (e) {
+        errs.push(e);
+      }
+    }
+  }
+  if (!d && !errs.length) {
+    return '';
+  }
+  let out;
+  if (d && errs.length) {
+    out = d + '\n\nWatcher note:\n' + errs.join(' ');
+  } else if (d) {
+    out = d;
+  } else {
+    out = 'Deal Watch note:\n' + errs.join(' ');
+  }
+  if (out.length > TELEGRAM_MAX_TEXT) {
+    out = out.substring(0, TELEGRAM_MAX_TEXT - 20) + '... (truncated)';
+  }
+  return out;
+}
+
+/**
+ * Time-trigger entry point: poll -> one merged send -> Runs.sent update.
+ * Silence ("" digest + no errors) sends nothing and returns "".
+ * Returns the text sent, or "" when nothing was sent. Never throws.
  */
 function runWatchAndNotify() {
-  return runWatchOnce();
+  try {
+    const pendingBefore = getPendingError_().replace(/^\s+|\s+$/g, '');
+    const digest = runWatchOnce();
+    const currentError = readLastRunsError_().replace(/^\s+|\s+$/g, '');
+    const errorParts = [];
+    if (pendingBefore) {
+      errorParts.push('Previous failure: ' + pendingBefore);
+    }
+    if (currentError) {
+      errorParts.push(currentError);
+    }
+    if (!digest && !errorParts.length) {
+      return '';
+    }
+    const toSend = buildMergedMessage_(digest, errorParts);
+    if (!toSend) {
+      return '';
+    }
+    const result = sendTelegramMessage_(toSend);
+    if (result && result.ok) {
+      try {
+        const props = PropertiesService.getScriptProperties();
+        props.deleteProperty(PROP_LAST_ERROR);
+        props.setProperty(PROP_CONSECUTIVE_FAILURES, '0');
+      } catch (e) {
+        // Ignore: send already succeeded.
+      }
+      updateLastRunsRow_(1, '');
+      return toSend;
+    }
+    const reason = result && result.error ? String(result.error) : 'Send failed.';
+    const n = getConsecutiveFailures_() + 1;
+    try {
+      const props = PropertiesService.getScriptProperties();
+      props.setProperty(PROP_CONSECUTIVE_FAILURES, String(n));
+      if (n <= MAX_CONSECUTIVE_FAILURES) {
+        const stamp = formatRunDate_(new Date());
+        const entry = ((stamp ? stamp + ' ' : '') + reason).substring(0, 500);
+        props.setProperty(PROP_LAST_ERROR, entry);
+      } else {
+        // Stop retrying stale backlog; polling continues, Runs keeps the audit.
+        props.deleteProperty(PROP_LAST_ERROR);
+      }
+    } catch (e) {
+      // Ignore: Runs still records the failure below.
+    }
+    updateLastRunsRow_(0, ('Send failed: ' + reason).substring(0, 500));
+    return '';
+  } catch (e) {
+    return '';
+  }
 }
