@@ -6,7 +6,7 @@ Watch Gmail for promotion emails from user-chosen senders (domain or full email)
 
 MVP is single-user; future non-tech users via per-copy deployment.
 
-T3-a helpers done (`src/Code.gs`); T3-b–T3-d then T4–T8 planned (see Build plan). No tests or deployment yet.
+T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5–T8 planned (see Build plan). No deployment yet.
 
 Architecture below is the intended design unless the user changes it.
 Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
@@ -84,7 +84,7 @@ Stack:
   - `start | end | found | sent | error` (watcher self-monitoring).
 
 - `ScriptProperties`:
-  - Secrets + owner binding + `last_error` + rules cache.
+  - Secrets + owner binding + `last_error` + `poll_interval_minutes` + `consecutive_send_failures` + rules cache.
   - Cache is one `rule_<id>` key per rule + `rules_version`/`updated_at`, latest version only; Sheet is the mirror.
 
 - Secrets (never in Sheet/code/repo/logs):
@@ -116,7 +116,8 @@ Stack:
   - One digest message per run (zero matches = silence).
   - No caps, no quiet hours (user mutes phone).
   - One thread appears once per digest with the union of matched keywords across rules and messages, plus subject/date/thread link (`.../#inbox/{threadId}`), no row/ID references.
-  - Errors pushed separately in English: send failures logged to `Runs` + `last_error`, missed errors re-pushed on next successful send, retry stops after N consecutive failures.
+  - Errors merged into the same message in English: send failures logged to `Runs` + `last_error`, missed errors re-pushed on next successful send, retry stops after 3 consecutive failures.
+  - `Runs.sent` is `0/1` per run (one merged message max; silence or send failure = `0`).
 
 ## Security, secrets and AI boundaries
 
@@ -147,14 +148,17 @@ Stack:
 - T2 — Spec (done):
   Schema, sender/keyword semantics, one-digest-per-run, per-copy isolation.
 
-- T3 — `Code.gs` core (sliced; confirm each before next; no `sendMessage`, send is T4/T5):
+- T3 — `Code.gs` core (done; no `sendMessage`, send is T4):
   - T3-a (done): helpers in `src/Code.gs` — `ensureSchema()`, normalization (`normalizeText`, `+tag` strip), `senderMatches`, `parseKeywords`/`matchKeywordsInText`, interval helpers (Properties read, 15 fallback, `newer_than` = 2x).
-  - T3-b: polling + per-message match — load enabled rules; batched `from:{...}` (15/query, max 2 searches/run, `newer_than:{2×}m`); cross-batch `message_id` dedup; `Log` check before `getPlainBody()`; own sent ignored; 20-thread cap; >30 senders truncate + invalid senders skip, both counted in `Runs` error.
-  - T3-c: digest + writes — per-thread collapse (union keywords, newest subject/date/link); one digest string per run (silence on zero); `Log`/`Runs` writes; 30-day `Log` prune; main entry returns digest without sending.
-  - T3-d: `src/appsscript.json` — `Asia/Hong_Kong`, V8, webapp (`USER_DEPLOYING` + `ANYONE_ANONYMOUS`), 5 minimal scopes (`spreadsheets.currentonly`, `gmail.readonly`, `script.storage`, `script.scriptapp`, `script.external_request`); default GCP project, no editors. Done = auth screen shows exactly these.
+  - T3-b (done): polling + per-message match — load enabled rules; batched `from:{...}` (15/query, max 2 searches/run, `newer_than:{2×}m`); cross-batch `message_id` dedup; `Log` check before `getPlainBody()`; own sent ignored; 20-thread cap; >30 senders truncate + invalid senders skip, both counted in `Runs` error.
+  - T3-c (done): digest + writes — per-thread collapse (union keywords, newest subject/date/link); one digest string per run (silence on zero); `Log`/`Runs` writes; 30-day `Log` prune; main entry returns digest without sending.
+  - T3-d (done): `src/appsscript.json` — `Asia/Hong_Kong`, V8, webapp (`USER_DEPLOYING` + `ANYONE_ANONYMOUS`), 5 minimal scopes (`spreadsheets.currentonly`, `gmail.readonly`, `script.storage`, `script.scriptapp`, `script.external_request`); default GCP project, no editors. Done = auth screen shows exactly these.
+  - Acceptance tests (done): `test/TESTING.md` + `test/T3-TestingPlan.md` + `test/TestT3.gs` (temporary runner, one-paste-one-run).
 
-- T4 — Trigger + self-monitoring:
-  Trigger options + `Runs`/error pushes per above.
+- T4 — Trigger + self-monitoring (sliced; backend only, no Sheet menu; interval UI is T5):
+  - T4-a (done): `ensureTrigger()` + `setPollIntervalMinutes()` (idempotent, no duplicates); `15/30/60` via `everyMinutes`, `120/360/720` via `everyHours`; handler `runWatchAndNotify()` (stub calls `runWatchOnce()`).
+  - T4-b (done): send + fallback — one merged `sendMessage` per run (digest + English error block); `Runs.sent 0/1`; `last_error` + `consecutive_send_failures` with stop-after-3; silence stays silent unless a pending error exists.
+  - T4-c (done): human-readable `T4-TestingPlan.md` + `TestT4.gs` (temporary runner, one-paste-one-run; no test mails needed).
 
 - T5 — Telegram UX + one-time Setup:
   Flows per above.

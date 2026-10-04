@@ -965,8 +965,9 @@ function runWatchOnce() {
 // Locked per CONTEXT.md:
 // - Time-driven, default 15min, fixed options [15,30,60,120,360,720].
 // - Idempotent: rerun never duplicates triggers.
-// - Handler is runWatchAndNotify() (T4-b adds send; T4-a stub just polls).
-// - 15/30/60 use everyMinutes(n); 120/360/720 use everyHours(2/6/12).
+// - Handler is runWatchAndNotify() (poll -> one merged send).
+// - 15/30 use everyMinutes(n); 60/120/360/720 use everyHours(1/2/6/12).
+//   (everyMinutes only accepts 1/5/10/15/30, so 60 must go the hours route.)
 
 const TRIGGER_HANDLER = 'runWatchAndNotify';
 
@@ -974,7 +975,9 @@ const TRIGGER_HANDLER = 'runWatchAndNotify';
  * Store a poll interval and rebuild the trigger.
  * Valid = one of ALLOWED_INTERVAL_MINUTES; anything else is ignored
  * (no store, no trigger change) and the current effective value is returned.
- * Returns the effective interval in minutes.
+ * The property is written only after the trigger builds successfully, so a
+ * builder failure never leaves a stored value with no trigger behind.
+ * Returns the effective interval in minutes. Throws on trigger API failure.
  */
 function setPollIntervalMinutes(minutes) {
   const n = parseInt(String(minutes).replace(/^\s+|\s+$/g, ''), 10);
@@ -988,8 +991,19 @@ function setPollIntervalMinutes(minutes) {
   if (!valid) {
     return getPollIntervalMinutes();
   }
-  PropertiesService.getScriptProperties().setProperty(PROP_POLL_INTERVAL, String(n));
-  ensureTrigger();
+  const props = PropertiesService.getScriptProperties();
+  const prev = props.getProperty(PROP_POLL_INTERVAL);
+  props.setProperty(PROP_POLL_INTERVAL, String(n));
+  try {
+    ensureTrigger();
+  } catch (e) {
+    if (prev === null || prev === undefined) {
+      props.deleteProperty(PROP_POLL_INTERVAL);
+    } else {
+      props.setProperty(PROP_POLL_INTERVAL, prev);
+    }
+    throw e;
+  }
   return n;
 }
 
@@ -1048,7 +1062,7 @@ function ensureTrigger() {
   } else if (interval === 30) {
     builder.everyMinutes(30).create();
   } else if (interval === 60) {
-    builder.everyMinutes(60).create();
+    builder.everyHours(1).create();
   } else {
     builder.everyMinutes(15).create();
   }

@@ -512,3 +512,47 @@ steps and miss risk.
 
 **Result.** T3 verifiable in one repeatable pass; the same pattern applies
 to T4+ runners later.
+
+## 25. T4 trigger + self-monitoring implemented and tested
+
+**Problem.** T4 needed a buildable split from T5, plus concrete answers for
+retry count, digest/error shape, and `Runs.sent`. T3 was also further along
+than `CONTEXT.md` claimed, and an accidental file deletion mid-task wiped
+the T4 code and the first version of this entry, so both had to be restored.
+
+**Options considered.** Send in T4 vs T5; stop-after-N with N = 3/5/10;
+digest + error as two messages vs one merged message; `Runs.sent` as 1/0
+vs message count; Sheet menu for interval in T4 vs backend-only.
+
+**How AI was used.** AI proposed the backend/UI split and the trade-offs;
+the owner decided each item through a `grill-me` round.
+
+**Decision.**
+
+- T4 is backend only (no Sheet menu); T5 owns all user-facing UI
+  (`doPost`, Setup, interval dropdown).
+- Stop-after-3 consecutive send failures (polling continues; only old-error
+  re-push stops).
+- One merged `sendMessage` per run (digest + English error block);
+  zero-match stays silent unless a pending error exists.
+- `Runs.sent` is `0/1` per run (one merged message max).
+- T4-a in `src/Code.gs`: `ensureTrigger()` + `setPollIntervalMinutes()`
+  (idempotent, no duplicates), `15/30/60` via `everyMinutes`,
+  `120/360/720` via `everyHours`, handler `runWatchAndNotify()`.
+- T4-b in `src/Code.gs`: `sendTelegramMessage_` (token redacted on errors,
+  never logged), `buildMergedMessage_`, `last_error` +
+  `consecutive_send_failures`, `Runs.sent` patched in place (never a second
+  row — one execution writes exactly one `Runs` row).
+- T4-c: human-readable `test/T4-TestingPlan.md` + `test/TestT4.gs`
+  (temporary runner, one-paste-one-run). No test mails needed — one invalid
+  sender rule supplies the error to send, and the missing-token path makes
+  no network calls.
+
+**Why.** Backend-only keeps T4 testable without a bot; 3 strikes tolerate
+1–2 blips without unbounded error backlog; one message avoids digest spam;
+`0/1` matches the merged shape; in-place `Runs` patching keeps the audit to
+one row per run.
+
+**Result.** `CONTEXT.md` status, storage, notify, and build-plan sections
+updated; T4 verifiable in one repeatable pass; T5 (Telegram UX + Setup)
+planned next.
