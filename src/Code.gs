@@ -948,3 +948,108 @@ function runWatchOnce() {
   appendRunsRow_(start, end, matches.length, 0, errorParts.join(' '));
   return digest;
 }
+
+// ---------------------------------------------------------------------------
+// T4-a: trigger management (no UI; T5 owns Telegram Setup/interval dropdown)
+// ---------------------------------------------------------------------------
+//
+// Locked per CONTEXT.md:
+// - Time-driven, default 15min, fixed options [15,30,60,120,360,720].
+// - Idempotent: rerun never duplicates triggers.
+// - Handler is runWatchAndNotify() (T4-b adds send; T4-a stub just polls).
+// - 15/30/60 use everyMinutes(n); 120/360/720 use everyHours(2/6/12).
+
+const TRIGGER_HANDLER = 'runWatchAndNotify';
+
+/**
+ * Store a poll interval and rebuild the trigger.
+ * Valid = one of ALLOWED_INTERVAL_MINUTES; anything else is ignored
+ * (no store, no trigger change) and the current effective value is returned.
+ * Returns the effective interval in minutes.
+ */
+function setPollIntervalMinutes(minutes) {
+  const n = parseInt(String(minutes).replace(/^\s+|\s+$/g, ''), 10);
+  let valid = false;
+  for (let i = 0; i < ALLOWED_INTERVAL_MINUTES.length; i++) {
+    if (n === ALLOWED_INTERVAL_MINUTES[i]) {
+      valid = true;
+      break;
+    }
+  }
+  if (!valid) {
+    return getPollIntervalMinutes();
+  }
+  PropertiesService.getScriptProperties().setProperty(PROP_POLL_INTERVAL, String(n));
+  ensureTrigger();
+  return n;
+}
+
+/**
+ * Delete all project triggers whose handler is TRIGGER_HANDLER.
+ * Returns the number deleted; never throws (0 on API failure).
+ */
+function deleteWatchTriggers_() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    let deleted = 0;
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === TRIGGER_HANDLER) {
+        ScriptApp.deleteTrigger(triggers[i]);
+        deleted++;
+      }
+    }
+    return deleted;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Count project triggers for TRIGGER_HANDLER (TestT4 helper).
+ */
+function countWatchTriggers_() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    let count = 0;
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === TRIGGER_HANDLER) {
+        count++;
+      }
+    }
+    return count;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Idempotent trigger setup: delete existing watch triggers, then create one
+ * from the effective interval. Throws on API failure so Setup (T5) can surface it.
+ */
+function ensureTrigger() {
+  deleteWatchTriggers_();
+  const interval = getPollIntervalMinutes();
+  const builder = ScriptApp.newTrigger(TRIGGER_HANDLER).timeBased();
+  if (interval === 120) {
+    builder.everyHours(2).create();
+  } else if (interval === 360) {
+    builder.everyHours(6).create();
+  } else if (interval === 720) {
+    builder.everyHours(12).create();
+  } else if (interval === 30) {
+    builder.everyMinutes(30).create();
+  } else if (interval === 60) {
+    builder.everyMinutes(60).create();
+  } else {
+    builder.everyMinutes(15).create();
+  }
+}
+
+/**
+ * T4-a stub: time-trigger entry point. Polls and returns the digest string.
+ * No Telegram send here (T4-b adds send + last_error + Runs.sent update).
+ * Zero matches -> "" (silence; caller must not send).
+ */
+function runWatchAndNotify() {
+  return runWatchOnce();
+}
