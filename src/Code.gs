@@ -52,16 +52,23 @@ const TELEGRAM_MAX_TEXT = 4000;
 // Schema
 // ---------------------------------------------------------------------------
 
+const SHEET_HOME = 'Home';
+
 /**
  * Idempotent schema provisioning: creates Rules/Log/Runs with headers when
  * missing, then hides them. Never writes example rows; never overwrites data.
  * Safe to call on every startup (open trigger / Setup rerun).
+ * A visible Home sheet is kept because Sheets forbids hiding every sheet.
  */
 function ensureSchema() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureSheetWithHeaders_(ss, SHEET_RULES, HEADERS_RULES);
   ensureSheetWithHeaders_(ss, SHEET_LOG, HEADERS_LOG);
   ensureSheetWithHeaders_(ss, SHEET_RUNS, HEADERS_RUNS);
+  ensureVisibleFrontSheet_(ss);
+  hideSheetIfOthersVisible_(ss, SHEET_RULES);
+  hideSheetIfOthersVisible_(ss, SHEET_LOG);
+  hideSheetIfOthersVisible_(ss, SHEET_RUNS);
 }
 
 function ensureSheetWithHeaders_(ss, name, headers) {
@@ -72,8 +79,83 @@ function ensureSheetWithHeaders_(ss, name, headers) {
   } else if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
+}
+
+/**
+ * Sheets rejects hiding the last visible sheet, so keep one front sheet
+ * visible. Created once with a short pointer; never overwritten.
+ */
+function ensureVisibleFrontSheet_(ss) {
+  const sheets = ss.getSheets();
+  let visibleCount = 0;
+  for (let i = 0; i < sheets.length; i++) {
+    try {
+      if (!sheets[i].isSheetHidden()) {
+        visibleCount++;
+      }
+    } catch (e) {
+      visibleCount++;
+    }
+  }
+  if (visibleCount > 0) {
+    return;
+  }
+  let home = ss.getSheetByName(SHEET_HOME);
+  if (!home) {
+    home = ss.insertSheet(SHEET_HOME);
+  }
+  try {
+    if (!home.isSheetHidden()) {
+      // already visible
+    } else {
+      home.showSheet();
+    }
+  } catch (e) {
+    // Ignore; hiding phase below will no-op if nothing is visible.
+  }
+  try {
+    if (home.getLastRow() === 0) {
+      home.getRange(1, 1, 2, 1).setValues([
+        ['Deal Watch — manage everything from Telegram.'],
+        ['Run Deal Watch > Setup once, then bind your bot with /start <token>. Rules/Log/Runs stay hidden.']
+      ]);
+    }
+    ss.setActiveSheet(home);
+  } catch (e) {
+    // Content is cosmetic; schema is already provisioned.
+  }
+}
+
+/**
+ * Hide one DB sheet, but never hide the last visible sheet.
+ */
+function hideSheetIfOthersVisible_(ss, name) {
+  const sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    return;
+  }
+  let hidden = false;
+  try {
+    hidden = sheet.isSheetHidden();
+  } catch (e) {
+    return;
+  }
+  if (hidden) {
+    return;
+  }
+  const sheets = ss.getSheets();
+  let visibleCount = 0;
+  for (let i = 0; i < sheets.length; i++) {
+    try {
+      if (!sheets[i].isSheetHidden()) {
+        visibleCount++;
+      }
+    } catch (e) {
+      visibleCount++;
+    }
+  }
   // Keep the DB out of the daily UI; users manage rules via Telegram only.
-  if (!sheet.isSheetHidden()) {
+  if (visibleCount > 1) {
     sheet.hideSheet();
   }
 }
@@ -1260,6 +1342,1245 @@ function buildMergedMessage_(digest, errorParts) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// T5-a/b: Telegram inbound + one-time Setup (no rule CRUD, no interval UI;
+//         no suggest, no /setkey — those are T5-c/d and T6).
+//
+// Locked per CONTEXT.md + owner grill:
+// - DM-only, single owner, /start <one-time token> bind.
+// - Non-owners silently ignored; groups rejected (silent).
+// - Sheet menu has Setup only; interval changes live in Telegram (T5-d).
+// - Bot UI English for now.
+// - /transfer = move to a new Telegram account (same bot/Sheet).
+//   /connect = replace bot token (same Sheet/owner).
+//   Both require an inline-button confirm.
+// - Conversation state in CacheService conv_<chat_id>, TTL ~10 min.
+// - Rules mirror in ScriptProperties rule_<id> (+ rules_version),
+//   latest version only, deleted on rule delete, rebuilt on disaster.
+// - max(id)+1 under ScriptLock for new rule ids (T5-c uses it).
+// ---------------------------------------------------------------------------
+
+const PROP_SETUP_TOKEN = 'setup_token';
+const PROP_WEBHOOK_SECRET = 'webhook_secret';
+const PROP_WEB_APP_URL = 'webapp_url';
+const PROP_RULES_VERSION = 'rules_version';
+const PROP_RULES_UPDATED = 'rules_updated_at';
+// Queue-jam watchdog (fallback): Telegram delivers webhook updates in order
+// and waits for a 200 OK per update. The HtmlService ack normally provides
+// it; if a jam still occurs (stale/deleted deployment, Google outage), a
+// jammed head update retries every ~60s and newer commands wait behind it.
+// When pending_update_count reaches the threshold, the next trigger run
+// alerts the owner with a one-tap clear button instead of staying silent.
+const QUEUE_PENDING_THRESHOLD = 3;
+const QUEUE_ALERT_COOLDOWN_SECONDS = 43200;
+const PROP_QUEUE_ALERT_AT = 'queue_alert_at';
+
+const CONV_TTL_SECONDS = 600;
+const LIST_PAGE_SIZE = 10;
+
+// Telegram at-least-once delivery: the same update_id may arrive several
+// times (retry / queue flush). Replays are dropped silently (see doPost).
+const DEDUP_TTL_SECONDS = 3600;
+// Owner re-/start after bind: reply at most once per window; the rest stay
+// silent so queued duplicates never become message spam.
+const ALREADY_SETUP_TTL_SECONDS = 600;
+
+function ruleCacheKey_(id) {
+  return 'rule_' + String(id);
+}
+
+function convCacheKey_(chatId) {
+  return 'conv_' + String(chatId);
+}
+
+function tgUpdateKey_(updateId) {
+  return 'tg_update_' + String(updateId);
+}
+
+function tgStartReplyKey_(chatId) {
+  return 'tg_startreply_' + String(chatId);
+}
+
+/**
+ * True when this update_id was already processed (caller must return ok
+ * silently). First sight marks the id; missing/invalid ids fail open
+ * (return false) so nothing is ever dropped blindly.
+ */
+function isDuplicateUpdate_(updateId) {
+  if (updateId === null || updateId === undefined || updateId === '') {
+    return false;
+  }
+  try {
+    const cache = CacheService.getScriptCache();
+    const key = tgUpdateKey_(updateId);
+    if (cache.get(key)) {
+      return true;
+    }
+    try {
+      cache.put(key, '1', DEDUP_TTL_SECONDS);
+    } catch (e2) {
+      // Mark is best-effort; the work below still runs once.
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * True when the owner re-/start reply may be sent now (marks the window).
+ * Fail-open (true) when the cache is unavailable, preserving old behaviour.
+ */
+function shouldReplyAlreadySetup_(chatId) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const key = tgStartReplyKey_(chatId);
+    if (cache.get(key)) {
+      return false;
+    }
+    try {
+      cache.put(key, '1', ALREADY_SETUP_TTL_SECONDS);
+    } catch (e2) {
+      // Mark is best-effort; the reply below still goes out once.
+    }
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
+/**
+ * Run fn while holding the script lock (id allocation + Sheet/cache writes).
+ * Returns fn() result; throws if the lock cannot be acquired.
+ */
+function withScriptLock_(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  try {
+    return fn();
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (e) {
+      // Ignore release errors; the work is already done.
+    }
+  }
+}
+
+/**
+ * Short-lived per-chat conversation state (CacheService, not Properties).
+ * Value is a small JSON object, e.g. { step: 'await_new_token' }.
+ */
+function getConv_(chatId) {
+  try {
+    const raw = CacheService.getScriptCache().get(convCacheKey_(chatId));
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function setConv_(chatId, obj) {
+  try {
+    CacheService.getScriptCache().put(
+      convCacheKey_(chatId),
+      JSON.stringify(obj || {}),
+      CONV_TTL_SECONDS
+    );
+  } catch (e) {
+    // Conversation state is best-effort; the user can restart the flow.
+  }
+}
+
+function clearConv_(chatId) {
+  try {
+    CacheService.getScriptCache().remove(convCacheKey_(chatId));
+  } catch (e) {
+    // Ignore.
+  }
+}
+
+function getOwnerChatId_() {
+  try {
+    const v = PropertiesService.getScriptProperties().getProperty(PROP_OWNER_CHAT_ID);
+    return v === null || v === undefined ? '' : String(v).replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    return '';
+  }
+}
+
+function getStoredBotToken_() {
+  try {
+    const v = PropertiesService.getScriptProperties().getProperty(PROP_BOT_TOKEN);
+    return v === null || v === undefined ? '' : String(v).replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Mask a secret for user-facing echo (never show the full value).
+ * e.g. "123456:ABC..." -> "1234...WXYZ".
+ */
+function maskSecret_(s) {
+  const t = String(s || '');
+  if (t.length <= 8) {
+    return '****';
+  }
+  return t.substring(0, 4) + '...' + t.substring(t.length - 4);
+}
+
+// ---------------------------------------------------------------------------
+// Telegram Bot API helpers (outbound to an arbitrary chat; token redacted)
+// ---------------------------------------------------------------------------
+
+/**
+ * Send text to any chat (binding/transfer/connect flows + future T5-c/d).
+ * replyMarkup is optional (reply keyboard / inline buttons).
+ * Returns { ok, error }; error never contains the token.
+ */
+function sendTelegramToChat_(token, chatId, text, replyMarkup) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const c = String(chatId || '').replace(/^\s+|\s+$/g, '');
+  if (!t) {
+    return { ok: false, error: 'Missing bot_token (Setup incomplete).' };
+  }
+  if (!c) {
+    return { ok: false, error: 'Missing chat id.' };
+  }
+  if (!text) {
+    return { ok: false, error: 'Nothing to send.' };
+  }
+  let out = String(text);
+  if (out.length > TELEGRAM_MAX_TEXT) {
+    out = out.substring(0, TELEGRAM_MAX_TEXT - 20) + '... (truncated)';
+  }
+  const payload = { chat_id: c, text: out };
+  if (replyMarkup) {
+    payload.reply_markup = replyMarkup;
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/sendMessage',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      }
+    );
+    const code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      return { ok: false, error: 'Telegram HTTP ' + code + '.' };
+    }
+    let body = '';
+    try {
+      body = resp.getContentText();
+    } catch (e2) {
+      body = '';
+    }
+    try {
+      const data = JSON.parse(body);
+      if (data && data.ok === true) {
+        return { ok: true, error: '' };
+      }
+      const desc = data && data.description ? String(data.description).substring(0, 200) : 'unknown error';
+      return { ok: false, error: 'Telegram rejected send: ' + desc };
+    } catch (e3) {
+      return { ok: false, error: 'Telegram bad response (HTTP ' + code + ').' };
+    }
+  } catch (e) {
+    let msg = e && e.message ? String(e.message) : String(e);
+    if (t) {
+      msg = msg.split(t).join('[redacted]');
+    }
+    return { ok: false, error: 'Send exception: ' + msg.substring(0, 200) };
+  }
+}
+
+function answerTelegramCallback_(token, callbackQueryId, text) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  if (!t || !callbackQueryId) {
+    return { ok: false, desc: 'skipped' };
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/answerCallbackQuery',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+          callback_query_id: callbackQueryId,
+          text: String(text || '').substring(0, 200)
+        }),
+        muteHttpExceptions: true
+      }
+    );
+    const code = resp.getResponseCode();
+    let desc = 'http=' + code;
+    try {
+      const data = JSON.parse(resp.getContentText());
+      if (data && data.ok === true) {
+        return { ok: true, desc: 'ok' };
+      }
+      desc = data && data.description ? String(data.description).substring(0, 200) : desc;
+    } catch (e2) {
+    }
+    return { ok: false, desc: desc };
+  } catch (e) {
+    // Dismissing the spinner is best-effort.
+    return { ok: false, desc: 'exception' };
+  }
+}
+
+function deleteTelegramMessage_(token, chatId, messageId) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  if (!t || !chatId || !messageId) {
+    return;
+  }
+  try {
+    UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/deleteMessage',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({ chat_id: String(chatId), message_id: messageId }),
+        muteHttpExceptions: true
+      }
+    );
+  } catch (e) {
+    // Deleting the raw secret message is best-effort.
+  }
+}
+
+/**
+ * Replace an inline-button message's text and drop its buttons in one call.
+ * Omitting reply_markup clears the inline keyboard, so the buttons cannot
+ * be tapped twice. Best-effort: edit failures (too old, not modified) are
+ * ignored and never throw from the webhook.
+ */
+function editTelegramMessageText_(token, chatId, messageId, text) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  if (!t || !chatId || !messageId || !text) {
+    return { ok: false, desc: 'skipped' };
+  }
+  let out = String(text);
+  if (out.length > TELEGRAM_MAX_TEXT) {
+    out = out.substring(0, TELEGRAM_MAX_TEXT - 20) + '... (truncated)';
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/editMessageText',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({ chat_id: String(chatId), message_id: messageId, text: out }),
+        muteHttpExceptions: true
+      }
+    );
+    const code = resp.getResponseCode();
+    let desc = 'http=' + code;
+    try {
+      const data = JSON.parse(resp.getContentText());
+      if (data && data.ok === true) {
+        return { ok: true, desc: 'ok' };
+      }
+      desc = data && data.description ? String(data.description).substring(0, 200) : desc;
+    } catch (e2) {
+    }
+    return { ok: false, desc: desc };
+  } catch (e) {
+    // Hiding the buttons is best-effort.
+    return { ok: false, desc: 'exception' };
+  }
+}
+
+/**
+ * Validate a bot token via getMe (no secrets logged, token redacted on error).
+ * Returns { ok, username, error }.
+ */
+function telegramGetMe_(token) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  if (!t) {
+    return { ok: false, username: '', error: 'Empty token.' };
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/getMe',
+      { method: 'get', muteHttpExceptions: true }
+    );
+    const code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      return { ok: false, username: '', error: 'Telegram HTTP ' + code + '.' };
+    }
+    const data = JSON.parse(resp.getContentText());
+    if (data && data.ok === true && data.result) {
+      return { ok: true, username: String(data.result.username || ''), error: '' };
+    }
+    return { ok: false, username: '', error: 'Invalid bot token.' };
+  } catch (e) {
+    let msg = e && e.message ? String(e.message) : String(e);
+    msg = msg.split(t).join('[redacted]');
+    return { ok: false, username: '', error: msg.substring(0, 200) };
+  }
+}
+
+/**
+ * Point the bot webhook at this deployment.
+ * The secret is embedded both as Telegram secret_token and as a URL query
+ * (?secret=...) because Apps Script doPost cannot read custom headers —
+ * the query param is what doPost actually verifies.
+ */
+function telegramSetWebhook_(token, webAppUrl, secret) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const base = String(webAppUrl || '').replace(/^\s+|\s+$/g, '');
+  const s = String(secret || '').replace(/^\s+|\s+$/g, '');
+  if (!t || !base || !s) {
+    return { ok: false, error: 'Missing token, URL, or secret.' };
+  }
+  const sep = base.indexOf('?') >= 0 ? '&' : '?';
+  const url = base + sep + 'secret=' + encodeURIComponent(s);
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/setWebhook',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({ url: url, secret_token: s, drop_pending_updates: true, max_connections: 1 }),
+        muteHttpExceptions: true
+      }
+    );
+    const code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      return { ok: false, error: 'Telegram HTTP ' + code + '.' };
+    }
+    const data = JSON.parse(resp.getContentText());
+    if (data && data.ok === true) {
+      return { ok: true, error: '' };
+    }
+    const desc = data && data.description ? String(data.description).substring(0, 200) : 'unknown error';
+    return { ok: false, error: 'setWebhook rejected: ' + desc };
+  } catch (e) {
+    let msg = e && e.message ? String(e.message) : String(e);
+    msg = msg.split(t).join('[redacted]').split(s).join('[redacted]');
+    return { ok: false, error: msg.substring(0, 200) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Queue-jam watchdog (early warning + one-tap clear, owner-confirmed only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the webhook queue depth via getWebhookInfo (server-side; the token
+ * never leaves ScriptProperties). Returns { ok, pending }. Any failure
+ * returns ok:false — callers treat meta-failures as "no signal", never as
+ * an alert, so a broken check cannot manufacture noise.
+ */
+function getQueuePending_(token) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  if (!t) {
+    return { ok: false, pending: 0 };
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/getWebhookInfo',
+      { method: 'get', muteHttpExceptions: true }
+    );
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) {
+      return { ok: false, pending: 0 };
+    }
+    const data = JSON.parse(resp.getContentText());
+    if (data && data.ok === true && data.result) {
+      const n = parseInt(String(data.result.pending_update_count), 10);
+      return { ok: true, pending: n > 0 ? n : 0 };
+    }
+    return { ok: false, pending: 0 };
+  } catch (e) {
+    return { ok: false, pending: 0 };
+  }
+}
+
+/**
+ * Jam check for the trigger run. Returns { alert, pending }: alert is true
+ * only when the queue is at/over threshold AND the cooldown has passed (at
+ * most one alert per QUEUE_ALERT_COOLDOWN_SECONDS). Marks the alert time
+ * when alerting. Pre-bind (no owner) never alerts — there is nobody to act.
+ */
+function checkQueueJam_() {
+  const empty = { alert: false, pending: 0 };
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const token = String(props.getProperty(PROP_BOT_TOKEN) || '').replace(/^\s+|\s+$/g, '');
+    const owner = String(props.getProperty(PROP_OWNER_CHAT_ID) || '').replace(/^\s+|\s+$/g, '');
+    if (!token || !owner) {
+      return empty;
+    }
+    let lastAlert = 0;
+    try {
+      lastAlert = parseInt(String(props.getProperty(PROP_QUEUE_ALERT_AT) || '0'), 10) || 0;
+    } catch (e2) {
+      lastAlert = 0;
+    }
+    if (lastAlert > 0 && Date.now() - lastAlert < QUEUE_ALERT_COOLDOWN_SECONDS * 1000) {
+      return empty;
+    }
+    const q = getQueuePending_(token);
+    if (!q.ok || q.pending < QUEUE_PENDING_THRESHOLD) {
+      return empty;
+    }
+    try {
+      props.setProperty(PROP_QUEUE_ALERT_AT, String(Date.now()));
+    } catch (e3) {
+      // The alert below still goes out once; worst case it repeats next run.
+    }
+    return { alert: true, pending: q.pending };
+  } catch (e) {
+    return empty;
+  }
+}
+
+/**
+ * Alert text + one-tap clear buttons. Sent as a separate control message
+ * (like transfer/connect confirmations), never merged into the digest.
+ */
+function sendQueueJamAlert_(token, chatId, pending) {
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'Telegram queue is jammed (' + pending + ' updates pending). ' +
+    'Your commands are waiting behind old retries — do not resend them. ' +
+    'Tap below to clear the queue and re-attach the webhook. Rules and history stay.',
+    {
+      inline_keyboard: [[
+        { text: 'Clear queue + re-attach', callback_data: 'queue:yes' },
+        { text: 'Cancel', callback_data: 'queue:no' }
+      ]]
+    }
+  );
+}
+
+/**
+ * Owner-confirmed queue clear: drop pending updates, then re-attach the
+ * webhook from the stored /exec URL + secret (no Sheet Setup round-trip,
+ * no token ever shown). Resets the alert cooldown on success so a future
+ * jam alerts fresh. Never throws.
+ */
+function clearQueueAndReattach_(token, chatId) {
+  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const c = String(chatId || '').replace(/^\s+|\s+$/g, '');
+  if (!t || !c) {
+    return;
+  }
+  let dropped = 0;
+  const before = getQueuePending_(t);
+  if (before.ok) {
+    dropped = before.pending;
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      'https://api.telegram.org/bot' + t + '/deleteWebhook',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({ drop_pending_updates: true }),
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) {
+      sendTelegramToChat_(t, c, 'Clear failed (Telegram HTTP ' + resp.getResponseCode() + '). Nothing changed. Rerun Deal Watch > Setup in the Sheet.');
+      return;
+    }
+    let dropOk = false;
+    try {
+      dropOk = !!JSON.parse(resp.getContentText()).ok;
+    } catch (e2) {
+      dropOk = false;
+    }
+    if (!dropOk) {
+      sendTelegramToChat_(t, c, 'Clear rejected by Telegram. Nothing changed. Rerun Deal Watch > Setup in the Sheet.');
+      return;
+    }
+  } catch (e) {
+    let msg = e && e.message ? String(e.message) : String(e);
+    msg = msg.split(t).join('[redacted]').substring(0, 200);
+    sendTelegramToChat_(t, c, 'Clear failed (' + msg + '). Nothing changed. Rerun Deal Watch > Setup in the Sheet.');
+    return;
+  }
+  let webAppUrl = '';
+  let secret = '';
+  try {
+    const props = PropertiesService.getScriptProperties();
+    webAppUrl = String(props.getProperty(PROP_WEB_APP_URL) || '').replace(/^\s+|\s+$/g, '');
+    secret = String(props.getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+  } catch (e3) {
+    webAppUrl = '';
+    secret = '';
+  }
+  if (!webAppUrl || !secret) {
+    sendTelegramToChat_(t, c, 'Queue cleared (' + dropped + ' dropped), but the stored webhook URL is missing — rerun Deal Watch > Setup in the Sheet to re-attach.');
+    return;
+  }
+  const wh = telegramSetWebhook_(t, webAppUrl, secret);
+  if (!wh.ok) {
+    sendTelegramToChat_(t, c, 'Queue cleared (' + dropped + ' dropped), but re-attach failed: ' + wh.error + ' Rerun Deal Watch > Setup in the Sheet.');
+    return;
+  }
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(PROP_QUEUE_ALERT_AT);
+  } catch (e4) {
+    // Cooldown reset is best-effort; the next jam still alerts after 12h.
+  }
+  sendTelegramToChat_(t, c, 'Queue cleared (' + dropped + ' dropped). Webhook re-attached. Send your command again — once.');
+}
+
+// ---------------------------------------------------------------------------
+// Rules mirror cache (ScriptProperties rule_<id>, latest version only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist one rule mirror entry (called on every rule write in T5-c).
+ * sheetRow is { id, sender, keywordsRaw, enabled, topicHint, updatedAt }.
+ */
+function saveRuleCache_(sheetRow) {
+  if (!sheetRow || !sheetRow.id) {
+    return;
+  }
+  try {
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty(ruleCacheKey_(sheetRow.id), JSON.stringify({
+      id: String(sheetRow.id),
+      sender: String(sheetRow.sender || ''),
+      keywords: String(sheetRow.keywordsRaw || ''),
+      enabled: !!sheetRow.enabled,
+      topicHint: String(sheetRow.topicHint || ''),
+      updatedAt: String(sheetRow.updatedAt || '')
+    }));
+    props.setProperty(PROP_RULES_VERSION, String(Date.now()));
+    props.setProperty(PROP_RULES_UPDATED, formatRunDate_(new Date()));
+  } catch (e) {
+    // Cache writes are best-effort; the Sheet stays the mirror.
+  }
+}
+
+function deleteRuleCache_(id) {
+  if (!id) {
+    return;
+  }
+  try {
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty(ruleCacheKey_(id));
+    props.setProperty(PROP_RULES_VERSION, String(Date.now()));
+    props.setProperty(PROP_RULES_UPDATED, formatRunDate_(new Date()));
+  } catch (e) {
+    // Ignore.
+  }
+}
+
+/**
+ * Next stable rule id as a numeric string (max+1), e.g. "6" after "5".
+ * Callers must hold the script lock across id-gen + Sheet append + cache
+ * write (use withScriptLock_); this helper reads under its own short lock
+ * for standalone callers.
+ */
+function nextRuleId_() {
+  return withScriptLock_(function () {
+    return maxRuleIdPlusOne_();
+  });
+}
+
+function maxRuleIdPlusOne_() {
+  let max = 0;
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RULES);
+    if (sheet && sheet.getLastRow() >= 2) {
+      const values = sheet.getDataRange().getValues();
+      let idIdx = 0;
+      for (let c = 0; c < values[0].length; c++) {
+        if (String(values[0][c]).replace(/^\s+|\s+$/g, '').toLowerCase() === 'id') {
+          idIdx = c;
+          break;
+        }
+      }
+      for (let r = 1; r < values.length; r++) {
+        const n = parseInt(String(values[r][idIdx]), 10);
+        if (n > max) {
+          max = n;
+        }
+      }
+    }
+  } catch (e) {
+    // Fall through with max=0; callers surface Sheet errors separately.
+  }
+  // Also consider cached ids so a freshly wiped Sheet still moves forward.
+  try {
+    const props = PropertiesService.getScriptProperties().getProperties();
+    for (const k in props) {
+      if (k.indexOf('rule_') === 0) {
+        try {
+          const o = JSON.parse(props[k]);
+          const n = parseInt(String(o && o.id), 10);
+          if (n > max) {
+            max = n;
+          }
+        } catch (e2) {
+          // Skip corrupt entries.
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore.
+  }
+  return String(max + 1);
+}
+
+/**
+ * Disaster recovery: if the Rules sheet is missing/empty but cached
+ * rule_<id> entries exist, recreate the rows from the cache.
+ * Additive only — never deletes cache based on Sheet content.
+ * Returns rows restored.
+ */
+function restoreRulesFromCacheIfNeeded_() {
+  let restored = 0;
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(SHEET_RULES);
+    const healthy = !!(sheet && sheet.getLastRow() >= 1);
+    if (healthy && sheet.getLastRow() >= 2) {
+      return 0; // Sheet has data; nothing to do.
+    }
+    const props = PropertiesService.getScriptProperties().getProperties();
+    const rows = [];
+    for (const k in props) {
+      if (k.indexOf('rule_') === 0) {
+        try {
+          const o = JSON.parse(props[k]);
+          if (o && o.id && o.sender) {
+            rows.push([
+              String(o.id),
+              String(o.sender || ''),
+              String(o.keywords || ''),
+              o.enabled ? true : false,
+              String(o.topicHint || ''),
+              String(o.updatedAt || formatRunDate_(new Date()))
+            ]);
+          }
+        } catch (e2) {
+          // Skip corrupt entries.
+        }
+      }
+    }
+    if (!rows.length) {
+      return 0;
+    }
+    ensureSchema();
+    sheet = ss.getSheetByName(SHEET_RULES);
+    if (!sheet) {
+      return 0;
+    }
+    rows.sort(function (a, b) {
+      return parseInt(a[0], 10) - parseInt(b[0], 10);
+    });
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADERS_RULES.length).setValues(rows);
+    restored = rows.length;
+  } catch (e) {
+    restored = 0;
+  }
+  return restored;
+}
+
+// ---------------------------------------------------------------------------
+// Sheet custom menu + one-time Setup (idempotent, Setup item only)
+// ---------------------------------------------------------------------------
+
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi()
+      .createMenu('Deal Watch')
+      .addItem('Setup', 'runSheetSetup')
+      .addToUi();
+  } catch (e) {
+    // Menu creation is best-effort (e.g. headless executions).
+  }
+}
+
+/**
+ * One-time Google Setup, run from Deal Watch > Setup in the Sheet.
+ * Idempotent: rerun outputs Already set up without overwriting the owner
+ * binding or rotating secrets.
+ */
+function runSheetSetup() {
+  const ui = SpreadsheetApp.getUi();
+  ensureSchema();
+  restoreRulesFromCacheIfNeeded_();
+
+  const props = PropertiesService.getScriptProperties();
+  let token = getStoredBotToken_();
+  const owner = getOwnerChatId_();
+
+  if (!token) {
+    const resp = ui.prompt(
+      'Deal Watch Setup',
+      'Paste the bot token from BotFather (/newbot):',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (resp.getSelectedButton() !== ui.Button.OK) {
+      return;
+    }
+    token = String(resp.getResponseText() || '').replace(/^\s+|\s+$/g, '');
+    if (!token) {
+      ui.alert('Setup cancelled: empty token.');
+      return;
+    }
+    const check = telegramGetMe_(token);
+    if (!check.ok) {
+      ui.alert('Invalid bot token: ' + check.error + '\nGet a new one from BotFather and retry.');
+      return;
+    }
+    props.setProperty(PROP_BOT_TOKEN, token);
+  } else {
+    const check = telegramGetMe_(token);
+    if (!check.ok) {
+      ui.alert(
+        'Stored bot token failed getMe: ' + check.error +
+        '\nIf you rotated the token, use Telegram /connect from the owner account.'
+      );
+      return;
+    }
+  }
+
+  // Trigger first (no duplicates by design), then webhook.
+  try {
+    ensureTrigger();
+  } catch (e) {
+    ui.alert('Setup failed creating the trigger: ' + String(e && e.message ? e.message : e).substring(0, 300));
+    return;
+  }
+
+  // Webhook target: pasted /exec URL, stored once, never rotated on rerun.
+  // Never auto-detected: getService().getUrl() returns the login-walled
+  // /dev URL and anonymous Telegram calls get 401.
+  let webAppUrl = '';
+  try {
+    webAppUrl = String(props.getProperty(PROP_WEB_APP_URL) || '').replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    webAppUrl = '';
+  }
+  if (!webAppUrl) {
+    const urlResp = ui.prompt(
+      'Deal Watch Setup',
+      'Paste the Web app URL from Deploy > Manage deployments (must end with /exec, not /dev):',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (urlResp.getSelectedButton() !== ui.Button.OK) {
+      ui.alert('Setup paused: webhook not attached. Rerun Setup and paste the /exec URL.');
+      return;
+    }
+    webAppUrl = String(urlResp.getResponseText() || '').replace(/^\s+|\s+$/g, '');
+    if (!webAppUrl) {
+      ui.alert('Setup paused: empty URL. Rerun Setup and paste the /exec URL.');
+      return;
+    }
+    if (/\/dev(\?.*)?$/.test(webAppUrl)) {
+      ui.alert('That is a /dev test URL (needs Google login — Telegram gets 401). Copy the /exec URL from Deploy > Manage deployments instead. Nothing was stored.');
+      return;
+    }
+    if (!/\/exec(\?.*)?$/.test(webAppUrl)) {
+      ui.alert('That URL does not end with /exec. Copy the Web app URL from Deploy > Manage deployments and rerun Setup. Nothing was stored.');
+      return;
+    }
+    props.setProperty(PROP_WEB_APP_URL, webAppUrl);
+  }
+
+  let secret = '';
+  try {
+    secret = String(props.getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    secret = '';
+  }
+  if (!secret) {
+    secret = Utilities.getUuid().replace(/-/g, '');
+    props.setProperty(PROP_WEBHOOK_SECRET, secret);
+  }
+
+  const wh = telegramSetWebhook_(token, webAppUrl, secret);
+  if (!wh.ok) {
+    ui.alert('Trigger is set, but setWebhook failed: ' + wh.error + '\nCheck the pasted /exec URL (to replace it, delete the webapp_url row in Script Properties and rerun Setup).');
+    return;
+  }
+
+  if (owner) {
+    ui.alert(
+      'Already set up.\n' +
+      'Owner is bound. Rerun does not overwrite the owner or rotate secrets.\n' +
+      'New Telegram account? Use /transfer. New bot token? Use /connect.'
+    );
+    return;
+  }
+
+  // First bind: mint a single-use setup token for /start <token>.
+  // Reused (never rotated) on pre-bind reruns; the caller reports which case.
+  let setupToken = '';
+  let freshSetupToken = false;
+  try {
+    setupToken = String(props.getProperty(PROP_SETUP_TOKEN) || '').replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    setupToken = '';
+  }
+  if (!setupToken) {
+    setupToken = Utilities.getUuid().replace(/-/g, '').substring(0, 32);
+    props.setProperty(PROP_SETUP_TOKEN, setupToken);
+    freshSetupToken = true;
+  }
+
+  const me = telegramGetMe_(token);
+  const username = me.ok ? me.username : '';
+  const link = username
+    ? 'https://t.me/' + username + '?start=' + setupToken
+    : '(open your bot and send: /start ' + setupToken + ')';
+
+  if (freshSetupToken) {
+    ui.alert(
+      'Setup complete. Bind Telegram once:\n\n' + link + '\n\n' +
+      'Open the link (or send /start ' + setupToken + ' to your bot). ' +
+      'The token is single-use.'
+    );
+  } else {
+    ui.alert(
+      'Google Setup already done. Use the same link below — no new token minted:\n\n' + link + '\n\n' +
+      'Open the link (or send /start ' + setupToken + ' to your bot).'
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inbound webhook router (T5-a skeleton + T5-b Setup flows)
+// ---------------------------------------------------------------------------
+
+/**
+ * Browser health check (browsers GET; Telegram POSTs to doPost).
+ * No params, no secrets, no logic — proves the deployment is live.
+ */
+function doGet() {
+  try {
+    // HtmlService avoids the ContentService 302 path that Telegram treats
+    // as a failed webhook delivery (pending_update_count retries).
+    return HtmlService.createHtmlOutput('Deal Watch webhook alive. Open your bot in Telegram.');
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Telegram webhook entry. Verifies the URL secret (?secret=...), drops
+ * redelivered update_ids silently (at-least-once dedup), enforces
+ * DM-only + owner allowlist (silent ignore otherwise), then routes:
+ * /start, /transfer, /connect (+ callbacks). Rule CRUD (T5-c) and
+ * interval/status (T5-d) reply that they arrive next to avoid silent dead
+ * ends during the sliced rollout.
+ */
+function doPost(e) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    let storedSecret = '';
+    try {
+      storedSecret = String(props.getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+    } catch (err) {
+      storedSecret = '';
+    }
+    if (storedSecret) {
+      let got = '';
+      try {
+        got = String((e && e.parameter && e.parameter.secret) || '').replace(/^\s+|\s+$/g, '');
+      } catch (err2) {
+        got = '';
+      }
+      if (got !== storedSecret) {
+        return telegramOk_();
+      }
+    }
+
+    let update = null;
+    try {
+      update = JSON.parse(e.postData.contents);
+    } catch (err) {
+      return telegramOk_();
+    }
+    if (!update) {
+      return telegramOk_();
+    }
+
+    // At-least-once dedup (same update_id redelivered by retry / queue
+    // flush): replays return ok silently without re-running any handler.
+    try {
+      if (update.update_id !== undefined && update.update_id !== null && update.update_id !== '') {
+        if (isDuplicateUpdate_(update.update_id)) {
+          return telegramOk_();
+        }
+      }
+    } catch (errDedup) {
+      // Fail-open: process the update as normal.
+    }
+
+    if (update.callback_query) {
+      handleCallback_(update.callback_query);
+      return telegramOk_();
+    }
+
+    const msg = update.message;
+    if (!msg || !msg.chat) {
+      return telegramOk_();
+    }
+    const chatType = String(msg.chat.type || 'private');
+    if (chatType !== 'private') {
+      return telegramOk_(); // Groups/channels rejected silently.
+    }
+
+    const chatId = String(msg.chat.id);
+    const token = getStoredBotToken_();
+    const owner = getOwnerChatId_();
+    const text = String((msg.text || '')).replace(/^\s+|\s+$/g, '');
+    if (!text) {
+      return telegramOk_();
+    }
+
+    // Pre-bind: no owner yet — only /start claims the account.
+    if (!owner) {
+      if (/^\/start(\s|$)/.test(text)) {
+        handleStart_(token, chatId, text);
+      }
+      // Everything else pre-bind is silently ignored.
+      return telegramOk_();
+    }
+
+    // Post-bind: strangers silently ignored.
+    if (chatId !== owner) {
+      return telegramOk_();
+    }
+
+    // Owner conv continuation first (e.g. /connect awaiting new token).
+    const conv = getConv_(chatId);
+    if (conv && conv.step === 'await_new_token' && !/^\/\w/.test(text)) {
+      handleConnectToken_(token, chatId, text, msg.message_id);
+      return telegramOk_();
+    }
+
+    if (/^\/start(\s|$)/.test(text)) {
+      handleStart_(token, chatId, text);
+    } else if (/^\/transfer(\s|$)/.test(text)) {
+      handleTransferRequest_(token, chatId);
+    } else if (/^\/connect(\s|$)/.test(text)) {
+      handleConnectRequest_(token, chatId);
+    } else if (/^\/(list|add|rules|interval|status|help|suggest|setkey|setmodel)(\s|$)/.test(text)) {
+      sendTelegramToChat_(
+        token,
+        chatId,
+        'Not yet in this slice: rule management (T5-c) and interval/status (T5-d) arrive next. Available now: /transfer, /connect.'
+      );
+    } else {
+      sendTelegramToChat_(
+        token,
+        chatId,
+        'Unknown command. Available now: /transfer, /connect. Buttons arrive with rule management (T5-c).'
+      );
+    }
+    return telegramOk_();
+  } catch (err) {
+    return telegramOk_();
+  }
+}
+
+function telegramOk_() {
+  try {
+    // HtmlService avoids the ContentService 302 path that Telegram treats
+    // as a failed webhook delivery (pending_update_count retries).
+    return HtmlService.createHtmlOutput('ok');
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * /start handler (bind + rate-limited Already set up).
+ * Pre-bind with a valid single-use token claims ownership.
+ */
+function handleStart_(token, chatId, text) {
+  const props = PropertiesService.getScriptProperties();
+  const owner = getOwnerChatId_();
+  if (owner) {
+    if (String(chatId) === String(owner) && shouldReplyAlreadySetup_(chatId)) {
+      sendTelegramToChat_(token, chatId, 'Already set up. Use /transfer to move accounts, /connect to replace the token.');
+    }
+    // Strangers: silent (caller already gated, double-guard here).
+    return;
+  }
+  const m = String(text || '').match(/^\/start(?:\s+(\S+))?/);
+  const arg = m && m[1] ? String(m[1]).replace(/^\s+|\s+$/g, '') : '';
+  if (!arg) {
+    sendTelegramToChat_(token, chatId, 'Welcome to Deal Watch. Open the Setup link from the Sheet (Deal Watch > Setup) and tap it, or send /start <token>.');
+    return;
+  }
+  let expected = '';
+  try {
+    expected = String(props.getProperty(PROP_SETUP_TOKEN) || '').replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    expected = '';
+  }
+  if (expected && arg === expected) {
+    props.setProperty(PROP_OWNER_CHAT_ID, String(chatId));
+    props.deleteProperty(PROP_SETUP_TOKEN);
+    clearConv_(chatId);
+    sendTelegramToChat_(
+      token,
+      chatId,
+      'Setup complete. This account now owns the watcher.\nNew phone with the same account needs no action.'
+    );
+  } else {
+    sendTelegramToChat_(token, chatId, 'Invalid or expired token. Rerun Deal Watch > Setup in the Sheet for a fresh link.');
+  }
+}
+
+function handleTransferRequest_(token, chatId) {
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'Transfer moves this watcher to your current Telegram account.\nRules and history stay. The old account stops working.',
+    {
+      inline_keyboard: [[
+        { text: 'Yes, move it here', callback_data: 'transfer:yes' },
+        { text: 'Cancel', callback_data: 'transfer:no' }
+      ]]
+    }
+  );
+}
+
+function handleConnectRequest_(token, chatId) {
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'Connect replaces the bot token for the same Sheet.\nUse this only after you generated a new token in BotFather.\nRules and history stay.',
+    {
+      inline_keyboard: [[
+        { text: 'Yes, replace token', callback_data: 'connect:yes' },
+        { text: 'Cancel', callback_data: 'connect:no' }
+      ]]
+    }
+  );
+}
+
+function handleCallback_(cb) {
+  try {
+    const token = getStoredBotToken_();
+    const owner = getOwnerChatId_();
+    const fromId = cb.from ? String(cb.from.id) : '';
+    const msg = cb.message || {};
+    const chatId = msg.chat ? String(msg.chat.id) : fromId;
+    if (!chatId || String(msg.chat && msg.chat.type || 'private') !== 'private') {
+      return;
+    }
+    // Pre-bind callbacks: only /start claim is allowed; ignore buttons.
+    if (!owner || chatId !== String(owner)) {
+      // Allow the claimant to press nothing pre-bind — stay silent.
+      return;
+    }
+    const data = String(cb.data || '');
+    const qid = cb.id || '';
+    const messageId = msg.message_id;
+
+    if (data === 'transfer:yes') {
+      answerTelegramCallback_(token, qid, 'Transfer confirmed');
+      editTelegramMessageText_(token, chatId, messageId, 'Transfer confirmed. See the token below.');
+      // The claiming account IS this chat (owner moving to a new account is
+      // handled by minting a transfer token; pressing Yes here from the
+      // owner account re-mints the token for the new device flow).
+      // Simplest secure flow: mint a single-use token; the NEW account
+      // claims it via /start <token>, which overwrites owner_chat_id.
+      const transferToken = Utilities.getUuid().replace(/-/g, '').substring(0, 32);
+      PropertiesService.getScriptProperties().setProperty(PROP_SETUP_TOKEN, transferToken);
+      sendTelegramToChat_(
+        token,
+        chatId,
+        'Transfer token minted (single-use). On the NEW Telegram account, open your bot and send:\n/start ' + transferToken
+      );
+    } else if (data === 'transfer:no') {
+      answerTelegramCallback_(token, qid, 'Cancelled');
+      editTelegramMessageText_(token, chatId, messageId, 'Transfer cancelled. Nothing changed.');
+    } else if (data === 'connect:yes') {
+      answerTelegramCallback_(token, qid, 'Send the new token');
+      setConv_(chatId, { step: 'await_new_token' });
+      editTelegramMessageText_(token, chatId, messageId, 'Confirmed. Paste the new token from BotFather as one message (it will be deleted right after). Send /connect again to abort.');
+    } else if (data === 'connect:no') {
+      answerTelegramCallback_(token, qid, 'Cancelled');
+      clearConv_(chatId);
+      editTelegramMessageText_(token, chatId, messageId, 'Connect cancelled. Nothing changed.');
+    } else if (data === 'queue:yes') {
+      answerTelegramCallback_(token, qid, 'Clearing queue');
+      editTelegramMessageText_(token, chatId, messageId, 'Clearing queue...');
+      clearQueueAndReattach_(token, chatId);
+    } else if (data === 'queue:no') {
+      answerTelegramCallback_(token, qid, 'Cancelled');
+      editTelegramMessageText_(token, chatId, messageId, 'Nothing changed. I will remind you again in 12 hours if the queue is still jammed.');
+    } else if (data) {
+      // Unknown callback: stay silent.
+    }
+  } catch (e) {
+    // Never throw from the webhook.
+  }
+}
+
+/**
+ * Continuation for /connect: the owner pasted a new BotFather token.
+ * Validates via getMe, stores, re-attaches the webhook, deletes the raw
+ * token message immediately, and never echoes the full token.
+ */
+function handleConnectToken_(token, chatId, text, incomingMessageId) {
+  const fresh = String(text || '').replace(/^\s+|\s+$/g, '');
+  if (!fresh || /\s/.test(fresh) || fresh.length < 20 || fresh.indexOf(':') < 0) {
+    sendTelegramToChat_(token, chatId, 'That does not look like a BotFather token (expected digits:letters). Paste again, or send /connect to abort.');
+    return;
+  }
+  const check = telegramGetMe_(fresh);
+  // Delete the raw secret message first, whatever the result.
+  deleteTelegramMessage_(token, chatId, incomingMessageId);
+  if (!check.ok) {
+    sendTelegramToChat_(token, chatId, 'New token rejected (' + maskSecret_(fresh) + '): ' + check.error + ' Nothing changed.');
+    return;
+  }
+  try {
+    PropertiesService.getScriptProperties().setProperty(PROP_BOT_TOKEN, fresh);
+  } catch (e) {
+    sendTelegramToChat_(token, chatId, 'Could not store the new token. Nothing changed.');
+    return;
+  }
+  clearConv_(chatId);
+  // Re-attach using the stored /exec URL (never getUrl() — it returns /dev).
+  let webAppUrl = '';
+  try {
+    webAppUrl = String(PropertiesService.getScriptProperties().getProperty(PROP_WEB_APP_URL) || '').replace(/^\s+|\s+$/g, '');
+  } catch (e) {
+    webAppUrl = '';
+  }
+  if (webAppUrl) {
+    let secret = '';
+    try {
+      secret = String(PropertiesService.getScriptProperties().getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+    } catch (e) {
+      secret = '';
+    }
+    if (secret) {
+      const wh = telegramSetWebhook_(fresh, webAppUrl, secret);
+      if (!wh.ok) {
+        sendTelegramToChat_(token, chatId, 'Token replaced (' + maskSecret_(fresh) + '), but setWebhook failed: ' + wh.error + ' Rerun Deal Watch > Setup in the Sheet.');
+        return;
+      }
+    }
+  }
+  sendTelegramToChat_(token, chatId, 'Token replaced (' + maskSecret_(fresh) + '). Webhook re-attached. The old token stops working.');
+}
+
 /**
  * Time-trigger entry point: poll -> one merged send -> Runs.sent update.
  * Silence ("" digest + no errors) sends nothing and returns "".
@@ -1276,6 +2597,24 @@ function runWatchAndNotify() {
     }
     if (currentError) {
       errorParts.push(currentError);
+    }
+    // Queue-jam watchdog (early warning only; the clear itself needs an
+    // owner tap on the alert buttons). The audit line rides the merged
+    // message; the buttons ride a separate control message.
+    const jam = checkQueueJam_();
+    if (jam.alert) {
+      errorParts.push('Telegram queue jammed (' + jam.pending + ' pending).');
+      try {
+        const jamProps = PropertiesService.getScriptProperties();
+        const jamToken = String(jamProps.getProperty(PROP_BOT_TOKEN) || '').replace(/^\s+|\s+$/g, '');
+        const jamOwner = String(jamProps.getProperty(PROP_OWNER_CHAT_ID) || '').replace(/^\s+|\s+$/g, '');
+        if (jamToken && jamOwner) {
+          sendQueueJamAlert_(jamToken, jamOwner, jam.pending);
+        }
+      } catch (eJam) {
+        // Button send is best-effort; the audit line above still rides the
+        // merged message when the digest send succeeds.
+      }
     }
     if (!digest && !errorParts.length) {
       return '';

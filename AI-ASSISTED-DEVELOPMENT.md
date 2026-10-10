@@ -478,81 +478,161 @@ Multi-OAuth additionally multiplies runtime against the per-execution and daily 
 
 ## 24. Reusable T3 acceptance tests (checklist + runner)
 
-**Problem.** T3 had code but no repeatable way to verify it; re-running
-from memory risked missed or mistaken steps.
+**Problem.** T3 had code but no repeatable way to verify it; re-running from memory risked missed or mistaken steps.
 
-**Options considered.** Markdown checklist only; temporary `Test.gs`
-runner only; local Node automation; both checklist + runner.
+**Options considered.** Markdown checklist only; temporary `Test.gs` runner only; local Node automation; both checklist + runner.
 
-**How AI was used.** AI confirmed local automation only covers pure
-helpers (`normalizeText`, `senderMatches`, …) — anything touching
-`SpreadsheetApp`/`GmailApp`/`PropertiesService` needs the bound
-environment, so mocking it locally buys little for the maintenance cost.
+**How AI was used.** AI confirmed local automation only covers pure helpers (`normalizeText`, `senderMatches`, …) — anything touching `SpreadsheetApp`/`GmailApp`/`PropertiesService` needs the bound environment, so mocking it locally buys little for the maintenance cost.
 
-**Decision.** Owner chose both, one file per milestone (T3 vs T4 split,
-not per subtask):
+**Decision.** Owner chose both, one file per milestone (T3 vs T4 split, not per subtask):
 
-- `test/TESTING.md` (English, in-repo): the master flow — prep with exact
-  `Rules` rows and a second-account test-mail recipe (real `From` headers
-  cannot be forged, so a `gmail.com` + full-email rule pair on one mail
-  exercises contains/exact/union), per-subtask boxes with expected results,
-  ordered cleanup. T4–T8 reserved as placeholders.
-- `test/TestT3.gs`: one `runAllT3Checks()` pasted into the editor as a
-  temporary file, run once, deleted after; `PASS/FAIL/SKIP` lines map 1:1
-  to the checklist, with `SKIP` (not fail) for prep-dependent checks on the
-  720-fallback path. Expected writes (`Log`/`Runs`, prune dummy) are part
-  of the design and removed in Cleanup. Never shipped in the template
-  (`test/` is not pushed to Apps Script).
+- `test/TESTING.md` (English, in-repo): the master flow — prep with exact `Rules` rows and a second-account test-mail recipe (real `From` headers cannot be forged, so a `gmail.com` + full-email rule pair on one mail exercises contains/exact/union), per-subtask boxes with expected results, ordered cleanup. T4–T8 reserved as placeholders.
+- `test/TestT3.gs`: one `runAllT3Checks()` pasted into the editor as a temporary file, run once, deleted after; `PASS/FAIL/SKIP` lines map 1:1 to the checklist, with `SKIP` (not fail) for prep-dependent checks on the 720-fallback path. Expected writes (`Log`/`Runs`, prune dummy) are part of the design and removed in Cleanup. Never shipped in the template (`test/` is not pushed to Apps Script).
 
-**Why.** The checklist removes memory dependence (every manual click
-spelled out); the runner removes per-function manual runs (the editor Run
-button takes no arguments and hides bare returns). One file per milestone
-keeps each pass one-paste-one-run — splitting per subtask would multiply
-steps and miss risk.
+**Why.** The checklist removes memory dependence (every manual click spelled out); the runner removes per-function manual runs (the editor Run button takes no arguments and hides bare returns). One file per milestone keeps each pass one-paste-one-run — splitting per subtask would multiply steps and miss risk.
 
-**Result.** T3 verifiable in one repeatable pass; the same pattern applies
-to T4+ runners later.
+**Result.** T3 verifiable in one repeatable pass; the same pattern applies to T4+ runners later.
 
 ## 25. T4 trigger + self-monitoring implemented and tested
 
-**Problem.** T4 needed a buildable split from T5, plus concrete answers for
-retry count, digest/error shape, and `Runs.sent`. T3 was also further along
-than `CONTEXT.md` claimed, and an accidental file deletion mid-task wiped
-the T4 code and the first version of this entry, so both had to be restored.
+**Problem.** T4 needed a buildable split from T5, plus concrete answers for retry count, digest/error shape, and `Runs.sent`. T3 was also further along than `CONTEXT.md` claimed, and an accidental file deletion mid-task wiped the T4 code and the first version of this entry, so both had to be restored.
 
-**Options considered.** Send in T4 vs T5; stop-after-N with N = 3/5/10;
-digest + error as two messages vs one merged message; `Runs.sent` as 1/0
-vs message count; Sheet menu for interval in T4 vs backend-only.
+**Options considered.** Send in T4 vs T5; stop-after-N with N = 3/5/10; digest + error as two messages vs one merged message; `Runs.sent` as 1/0 vs message count; Sheet menu for interval in T4 vs backend-only.
 
-**How AI was used.** AI proposed the backend/UI split and the trade-offs;
-the owner decided each item through a `grill-me` round.
+**How AI was used.** AI proposed the backend/UI split and the trade-offs; the owner decided each item through a `grill-me` round.
 
 **Decision.**
 
-- T4 is backend only (no Sheet menu); T5 owns all user-facing UI
-  (`doPost`, Setup, interval dropdown).
-- Stop-after-3 consecutive send failures (polling continues; only old-error
-  re-push stops).
-- One merged `sendMessage` per run (digest + English error block);
-  zero-match stays silent unless a pending error exists.
+- T4 is backend only (no Sheet menu); T5 owns all user-facing UI (`doPost`, Setup, interval dropdown).
+- Stop-after-3 consecutive send failures (polling continues; only old-error re-push stops).
+- One merged `sendMessage` per run (digest + English error block); zero-match stays silent unless a pending error exists.
 - `Runs.sent` is `0/1` per run (one merged message max).
-- T4-a in `src/Code.gs`: `ensureTrigger()` + `setPollIntervalMinutes()`
-  (idempotent, no duplicates), `15/30/60` via `everyMinutes`,
-  `120/360/720` via `everyHours`, handler `runWatchAndNotify()`.
-- T4-b in `src/Code.gs`: `sendTelegramMessage_` (token redacted on errors,
-  never logged), `buildMergedMessage_`, `last_error` +
-  `consecutive_send_failures`, `Runs.sent` patched in place (never a second
-  row — one execution writes exactly one `Runs` row).
-- T4-c: human-readable `test/T4-TestingPlan.md` + `test/TestT4.gs`
-  (temporary runner, one-paste-one-run). No test mails needed — one invalid
-  sender rule supplies the error to send, and the missing-token path makes
-  no network calls.
+- T4-a in `src/Code.gs`: `ensureTrigger()` + `setPollIntervalMinutes()` (idempotent, no duplicates), `15/30/60` via `everyMinutes`, `120/360/720` via `everyHours`, handler `runWatchAndNotify()`.
+- T4-b in `src/Code.gs`: `sendTelegramMessage_` (token redacted on errors, never logged), `buildMergedMessage_`, `last_error` + `consecutive_send_failures`, `Runs.sent` patched in place (never a second row — one execution writes exactly one `Runs` row).
+- T4-c: human-readable `test/T4-TestingPlan.md` + `test/TestT4.gs` (temporary runner, one-paste-one-run). No test mails needed — one invalid sender rule supplies the error to send, and the missing-token path makes no network calls.
 
-**Why.** Backend-only keeps T4 testable without a bot; 3 strikes tolerate
-1–2 blips without unbounded error backlog; one message avoids digest spam;
-`0/1` matches the merged shape; in-place `Runs` patching keeps the audit to
-one row per run.
+**Why.** Backend-only keeps T4 testable without a bot; 3 strikes tolerate 1–2 blips without unbounded error backlog; one message avoids digest spam; `0/1` matches the merged shape; in-place `Runs` patching keeps the audit to one row per run.
 
-**Result.** `CONTEXT.md` status, storage, notify, and build-plan sections
-updated; T4 verifiable in one repeatable pass; T5 (Telegram UX + Setup)
-planned next.
+**Result.** `CONTEXT.md` status, storage, notify, and build-plan sections updated; T4 verifiable in one repeatable pass; T5 (Telegram UX + Setup) planned next.
+
+## 26. T5-a/b Telegram inbound + Setup implemented
+
+**Problem.** T3/T4 were backend-only; Telegram needed an inbound router plus a one-time Setup/bind flow, without pulling in rule CRUD (T5-c) or interval UI (T5-d).
+
+**Options considered.** One-shot full T5 vs sliced delivery (router + Setup first); conversation state in `CacheService` vs `ScriptProperties`; rule ids via `max+1` vs UUID; transfer flows with or without a confirm step.
+
+**How AI was used.** AI proposed the a+b slice and the trade-offs; the owner decided each item through a `grill-me` round: English-first UI, suggestion UI hidden until T6, `/setkey`/`/setmodel` deferred to T6, 10-rules-per-page list, duplicate sender → edit flow.
+
+**Decision.**
+
+- `doPost` verifies the URL `?secret=` (Apps Script cannot read the `secret_token` header), enforces DM-only + owner allowlist, and silently ignores strangers/groups. Unknown future commands get a "not yet in this slice" reply during the rollout.
+- Sheet menu has `Setup` only; `runSheetSetup()` is idempotent (no owner overwrite, no secret rotation); `/start <single-use token>` claims ownership; `/transfer` mints a claim token for the new account; `/connect` replaces the token after inline confirm (raw message deleted, masked echo only).
+- Conversation state lives in `CacheService` (`conv_<chat_id>`, 10-min TTL, removed on completion); new rule ids are `max+1` under `ScriptLock`.
+- Verification fixes, all additive: a visible `Home` front sheet (Sheets throws when hiding every sheet); a minimal `doGet` health reply (browsers GET, Telegram POSTs); pre-bind rerun re-shows the same link instead of mimicking first setup.
+
+**Why.** Router-first keeps T5 testable without rule logic; `CacheService` auto-expires short flows with no cleanup code; `max+1` stays human-readable while the lock closes the double-add race; additive-only fixes keep T3/T4 tests green.
+
+**Result.** `src/Code.gs` extended with T3/T4 untouched; the owner verifies on a test copy (AI never runs app/tests per project rule); T5-c/d/e planned next.
+
+## 27. Webhook URL must be pasted, not auto-detected
+
+**Problem.** After Deploy + Setup, Telegram reported `404 function not found`, then `401 Unauthorized`, with zero `doPost` executions — while a URL comparison the owner performed "matched".
+
+**Options considered.** Trust `getService().getUrl()`; string-replace `/dev` → `/exec`; list deployments via the Apps Script API (extra scope); paste the `/exec` URL manually into Setup.
+
+**How AI was used.** AI traced the two errors to two different causes (a stale versioned deployment behind the 404; a login-walled URL behind the 401) and caught its own bad guidance: comparing URL tails fails because `setWebhook` appends `?secret=`, and all deployment IDs share the `AKfyc` prefix, so prefix comparison proves nothing.
+
+**Decision.**
+
+- `getService().getUrl()` returns the login-walled `/dev` URL, so it can never feed `setWebhook` (anonymous Telegram gets 401). String replacement is rejected (`/dev` carries the script ID, `/exec` needs the deployment ID — different values).
+- Setup prompts for the `/exec` URL once, validates the `/exec` suffix (rejects `/dev` with an explanation), stores it as `webapp_url`, and never rotates it on rerun.
+
+**Why.** Deploy is already a manual step, so one adjacent copy-paste is the cheapest reliable source; no new OAuth scope, no Advanced Service, no magic.
+
+**Result.** Recorded in `CONTEXT.md` (Setup + `ScriptProperties` + onboarding); code change pending owner confirmation of this doc update.
+
+## 28. Setup-run diagnostics that look like bugs but aren't
+
+**Problem.** Two alarming execution rows during T5-b verification: `runSheetSetup` via menu ran 360s then `Timed out`; via editor it showed `Suspended` at 0s.
+
+**How AI was used.** AI read the rows against platform limits instead of changing code.
+
+**Decision.** No code change — both are platform behavior, recorded here so future sessions don't re-investigate:
+
+- 360s timeout = the 6-minute synchronous limit; a `Ui.alert`/`Ui.prompt` left unclicked blocks until timeout. The fix is procedural: stay on the Sheet tab and dismiss dialogs promptly.
+- Editor `Suspended` at 0s = OAuth consent pending (Firefox with tracking protection blocks the consent popup). The fix is procedural: allow popups for `script.google.com`, or authorize once in Chrome; menu runs use the Sheet grant and are unaffected.
+
+**Why.** Misreading these as code bugs would cause pointless rewrites; the real fixes are one-time user-side actions.
+
+**Result.** Noted as verification procedure; no `CONTEXT.md` change (procedural, not structural).
+
+## 29. Bind verification: webhook queue behavior
+
+**Problem.** During the T4+ manual bind pass, `/start <token>` showed three confusing symptoms: silence with no `doPost` in Executions; an intermittent `Invalid or expired token` reply for a freshly copied token; then one `/start` producing five `doPost` rows within seconds before `Setup complete` finally arrived. `getWebhookInfo` showed `302 Found` with a rising `pending_update_count`, while the same bot had previously served a now-deleted copy.
+
+**How AI was used.** AI traced each symptom to a distinct layer instead of treating them as one token bug: the `302` to the platform redirect (browsers follow it, so an incognito `/exec` check still shows alive, but Telegram does not); the `Invalid` replies to late delivery of queued old updates rather than the just-sent token; the `doPost` burst to a normal queue flush plus at-least-once delivery (first binds, the rest get `Already set up`); and the cross-copy confusion to one bot pointing at one copy only (`setWebhook` overwrites, last Setup wins).
+
+**Decision.** No code change — all procedural, recorded so future sessions don't re-investigate:
+
+- One bot serves one copy: delete the old copy first, rerun Setup on the live copy so it re-registers the webhook.
+- Before binding, clear the queue once (`deleteWebhook?drop_pending_updates=true`) and confirm `pending_update_count` is `0`; then send `/start` exactly once as plain text and never resend repeatedly.
+- Bind success fingerprint: `owner_chat_id` set and `setup_token` gone in Script Properties.
+
+**Why.** Each symptom looked like a code bug in isolation but was a platform or ordering effect; rewriting `handleStart_` would not have removed any of them.
+
+**Result.** `test/T4-TestingPlan.md` updated (bind marked done, clear-queue URL added, section 4b troubleshooting for the four symptoms); no `CONTEXT.md` change (procedural, not structural).
+
+## 30. Webhook retry spam after bind (update_id dedup + reply rate-limit)
+
+**Problem.** After a successful bind (`Setup complete` received, `owner_chat_id` set, `setup_token` gone), Telegram kept pushing `Already set up` every few seconds. Executions showed ~9 `doPost` rows in 4 minutes, each completing in 1–3s — the script was healthy, but every redelivery re-ran `handleStart_` and re-sent the reply. `getWebhookInfo` showed a lingering `pending_update_count: 1` with `last_error_message: 302 Found` (the known Apps Script redirect from #29, present even with `Anyone` access and the correct `/exec` URL).
+
+A second incident compounded it: the `deleteWebhook?drop_pending_updates=true` clear-queue URL also deletes the webhook registration itself (`getWebhookInfo` then shows `"url": ""`), so nothing is delivered until Setup re-registers it.
+
+**Options considered.** Do nothing (burst stops on its own, but any future retry re-spams); `update_id` dedup only (stops Telegram redelivery, not human double-taps); silent `Already set up` always (simplest, but an old-link tap gets zero feedback); dedup + rate-limit combined.
+
+**How AI was used.** AI traced the spam to at-least-once delivery (first update binds, each replay hits the owner-exists branch) and asked the owner to pick the reply behaviour and dedup scope.
+
+**Decision.** Owner chose combined, verified on the live copy:
+
+- **Dedup (去重).** `doPost` records each `update.update_id` in `CacheService` (`tg_update_<id>`, 1-hour TTL) after the secret check and before routing; replays return `ok` silently. Covers messages and callback queries, so button double-taps (transfer / connect token minting) are hardened too. Missing/invalid ids and cache failures fail open (processed as before, never dropped blindly).
+- **Rate-limit (限頻).** Owner re-`/start` after bind replies `Already set up` at most once per 10 minutes (`tg_startreply_<chat_id>`, 10-min TTL); the rest stay silent. Strangers stay silent as before. Bind logic itself untouched.
+
+**Why.** Same id = one delivery (stops Telegram retry); different ids in a burst = one reply (stops human double-taps). Fail-open keeps a cache outage to at worst one duplicate reply instead of a lost command.
+
+**Result.** 8 `doPost` rows in ~2 minutes on the new version produced exactly 1 `Already set up` in Telegram. The clear-queue URL must not be re-opened without a Setup rerun. `test/T4-TestingPlan.md` 4b updated to the new expectation; no `CONTEXT.md` change (behavioural hardening, not structural).
+
+## 31. Queue head-of-line block on /transfer (watchdog + one-tap clear)
+
+**Problem.** After bind, a re-`/start` got `Already set up` once, then a second `/start` and every `/transfer` got zero reply while `pending_update_count` climbed `3 → 4 → 8` with `last_error_message: 302 Found`. Executions showed a `doPost` row every ~60s, all `Completed` in under a second — so the script looked healthy, yet no new command ever answered.
+
+**How AI was used.** AI separated the two silences instead of treating them as one transfer bug: the second-`/start` silence is the intended 10-minute `Already set up` rate-limit (#30), while the `/transfer` silence plus a rising `pending` means the update never reached the script (silent-but-`ok` branches would still clear `pending`). Time-correlation (user send times vs `doPost` rows) showed every row was an old-`update_id` replay, never the new send.
+
+**Decision.** No command-logic change — the transfer path was always fine. Three findings, all verified on the live copy:
+
+- **Root cause: head-of-line blocking, not a code bug.** Telegram delivers webhook updates in order and waits for a `200 OK` per update; the webhook ack returned an unclean response, so the head update retried every ~60s forever and newer commands queued behind it. Gmail polling and digest sending are unaffected (outbound `sendMessage` uses a different API) — only inbound commands stall.
+- **Transient diagnosis, then removed.** A temporary `last_debug` / `last_new_debug` checkpoint mirror in `ScriptProperties` (Cloud logs are disabled on the default GCP project) proved new sends never passed the dedup gate; all of it was deleted after use, none remains in the template.
+- **Incidental catch.** The debug pass found `doPost` first line corrupted to `PropertiesService.getScriptProper==ties()` (an edit slip that threw on every webhook, masked by the outer `ok` catch). Fixed and swept for siblings (none).
+
+**Owner-approved hardening (one deploy).** A trigger-run watchdog calls `getWebhookInfo` server-side (no new scope, no new trigger): at `pending >= 3` it posts an English alert with inline `[Clear queue + re-attach]` / `[Cancel]` buttons (same confirm pattern as transfer/connect), at most once per 12 hours (`queue_alert_at`). Tapping Yes drops pending updates and re-attaches the webhook from the stored `/exec` URL + secret — no browser round-trip, no token ever shown (a pasted `deleteWebhook` link was rejected: the URL contains the full bot token, which must never sit in chat history). The audit line rides the merged digest message; `getWebhookInfo` failures stay silent. No auto-heal by design: clearing drops user updates, so a human taps first. Recurrence rule: never resend into a jam (each resend adds one to the queue).
+
+**Why.** The fix moves the failure from "silent stall" to "early warning + one tap". Threshold 3 (not 1) because #30 proved `pending: 1` can be noise with healthy replies.
+
+**Result.** `src/Code.gs` carries `checkQueueJam_` + `clearQueueAndReattach_` + `queue:yes/no` callbacks; `test/T4-TestingPlan.md` 4b gained the jam symptom and the button fix; no `CONTEXT.md` change (procedural, not structural). Debt: when T7 builds the docs site, its troubleshooting section needs the bilingual jam entry (one-tap flow); `README.md` stays minimal with a pointer.
+
+## 32. Webhook 302 prevent (HtmlService ack + setWebhook hardening)
+
+**Problem.** The jam kept returning: every command stalled while `pending_update_count` climbed, even though `doPost` rows showed `Completed`.
+
+**How AI was used.** Web search on 2026 Apps Script + Telegram reports surfaced the real layer: `ContentService.createTextOutput('ok')` is served via a Google CDN path that Telegram treats as `302 Moved Temporarily`. The script was healthy and outbound `sendMessage` worked — only the webhook ack was unclean, so Telegram retried the head update forever.
+
+**Options considered.** Keep watchdog-only (reactive); switch `telegramOk_`/`doGet` to `HtmlService.createHtmlOutput` (prevent); add `drop_pending_updates` + `max_connections: 1` to `setWebhook`; fall back to `getUpdates` polling if `HtmlService` failed on some accounts.
+
+**Decision.** Owner chose prevent-first, in slices:
+
+- **A1.** `telegramOk_()` + `doGet()` return `HtmlService.createHtmlOutput` instead of `ContentService`. All `doPost` exit paths inherit it. Verified on the live copy: `/transfer` → Cancel twice, `pending_update_count` stayed `0`.
+- **A2.** `telegramSetWebhook_()` sends `drop_pending_updates: true` + `max_connections: 1`. Re-attach auto-clears the old queue; single connection suits one owner.
+- **Cleanup.** Deleted the temporary `diagLog_` routing logs (marked `TEMP-DIAG`, remove in Task 3c). Kept dedup (`tg_update_`) + `Already set up` rate-limit (#30): at-least-once redelivery and human double-taps still exist even with clean `200`. Kept the watchdog as a safety net for non-302 jams (deleted deployment, Google outage).
+
+**Why.** The ack response shape was the bug. Fixing the ack stops retries at the source; the watchdog drops from primary fix to fallback. Threshold stays `3` — `pending: 1` blips are still possible on platform hiccups.
+
+**Result.** `test/T4-TestingPlan.md` 4b updated to the new fingerprint (`pending 0`); no `CONTEXT.md` change (behavioural hardening, not structural).

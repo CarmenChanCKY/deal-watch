@@ -6,7 +6,7 @@ Watch Gmail for promotion emails from user-chosen senders (domain or full email)
 
 MVP is single-user; future non-tech users via per-copy deployment.
 
-T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5–T8 planned (see Build plan). No deployment yet.
+T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c/d/e and T6–T8 planned (see Build plan).
 
 Architecture below is the intended design unless the user changes it.
 Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
@@ -49,18 +49,18 @@ Stack:
 - Script:
   - Gmail polling / matching / digest.
   - `doPost` command + callback router.
-  - Per-chat conversation state.
-  - Setup / transfer / connect and suggestion flows.
+  - Per-chat conversation state in `CacheService` (`conv_<chat_id>`, 10-min TTL).
+  - Setup / transfer / connect flows (suggestion UI hidden until T6).
 
 - Setup is idempotent per deployment:
-  - `ensureSchema()` + trigger creation (no duplicates) + `getMe` token validation + `setWebhook` + binding-link generation.
-  - Rerun outputs `Already set up` without overwriting owner or rotating secrets.
+  - `ensureSchema()` + trigger creation (no duplicates) + `getMe` token validation + `setWebhook` to a manually pasted `/exec` URL (stored as `webapp_url`; `getService().getUrl()` returns login-walled `/dev`, Telegram gets 401) + binding-link generation.
+  - Pre-bind rerun re-shows the same link (no rotation); post-bind rerun outputs `Already set up` without overwriting owner or rotating secrets.
   - Phone change = no action; TG-account change = `/transfer`; token rotation = `/connect`.
   - Rules persist because storage is decoupled from Telegram identity.
 
 - Onboarding is one-time Google Setup + rest-in-Telegram:
   - Copy template via `.../copy` link.
-  - Then `Deal Watch > Setup` (OAuth + paste `bot_token` + Deploy Web App once).
+  - Then `Deal Watch > Setup` (OAuth + paste `bot_token` + Deploy Web App once + paste the `/exec` URL).
   - Then Telegram `/start <token>` bind.
   - Telegram-only setup is impossible (OAuth consent, Web App deploy, trigger creation require Google UI).
 
@@ -73,6 +73,7 @@ Stack:
 - `Rules`:
   - `id` (stable, not a row number) `| sender | keywords (OR, comma) | enabled | topic_hint | updated_at`.
   - One entry per sender; sender is the natural key.
+  - New `id`s are `max(id)+1` allocated under `ScriptLock`.
   - Sender is either a domain (`xxx.com`) or a full email (`abc@xxx.com`), distinguished by presence of `@`.
 
 - `Log`:
@@ -84,14 +85,14 @@ Stack:
   - `start | end | found | sent | error` (watcher self-monitoring).
 
 - `ScriptProperties`:
-  - Secrets + owner binding + `last_error` + `poll_interval_minutes` + `consecutive_send_failures` + rules cache.
+  - Secrets + owner binding + `webapp_url` + `last_error` + `poll_interval_minutes` + `consecutive_send_failures` + rules cache.
   - Cache is one `rule_<id>` key per rule + `rules_version`/`updated_at`, latest version only; Sheet is the mirror.
 
 - Secrets (never in Sheet/code/repo/logs):
   - `bot_token | owner_chat_id | setup_token (single-use) | openrouter_key | llm_model | webhook_secret`.
 
 - Provisioning:
-  - Tables auto-provisioned by idempotent `ensureSchema()` (then hidden).
+  - Tables auto-provisioned by idempotent `ensureSchema()` (then hidden); a visible `Home` front sheet is kept because Sheets forbids hiding every sheet.
   - No example rule row — examples live in the Telegram welcome/add-rule prompts.
   - Users never create tables manually.
   - File deletion cannot be forbidden; mitigation is startup DB check + per-key `ScriptProperties` rebuild (`rule_<id>`) + file-hygiene guidance.
@@ -161,7 +162,10 @@ Stack:
   - T4-c (done): human-readable `T4-TestingPlan.md` + `TestT4.gs` (temporary runner, one-paste-one-run; no test mails needed).
 
 - T5 — Telegram UX + one-time Setup:
-  Flows per above.
+  - T5-a (done): `doPost` router + auth gate (URL `secret` check — Apps Script cannot read the `secret_token` header — DM-only, owner allowlist, silent ignore for strangers/groups).
+  - T5-b (done): Sheet `Setup` (menu item only) + `/start <token>` bind + `/transfer` + `/connect` (both with inline confirm); `rule_<id>` mirror cache; English UI first.
+  - T5-c/d/e (planned): rule CRUD (`/list` 10/page → detail, duplicate sender → edit, 30-enabled block) + interval/status/help + `T5-TestingPlan.md` + `TestT5.gs`.
+  - Deferred: suggestion UI + `/setkey` + `/setmodel` stay in T6; `topic_hint` unused until T6.
 
 - T6 — Suggestion (optional):
   Fenced OpenRouter seed-only flow per above.
