@@ -23,6 +23,14 @@ Thinking process and decision history (problems, options, why): see [AI-ASSISTED
 ### Coding style
 
 - In `.gs` files, prefer `const` / `let` for variable declarations. Use `var` only as a last resort.
+- Single-file: keep `src/Code.gs` as one file. Add new helpers to the matching section; do not split into multiple `.gs` files.
+- Tidy defaults to zero behaviour change: extract, rename, or reorder only. Do not change return values, `Ui.alert` / Telegram texts, `Runs` / `Log` schema, or silent-vs-reply logic. Behaviour changes need a separate approved task.
+- Small helpers over long functions: split functions into a thin orchestrator plus named helpers with early returns.
+- Constants in Config: no bare URLs, lengths, unicode code points, or time factors outside Config. Use `UPPER_SNAKE` names.
+- Named silent paths: every silent `return telegramOk_()` / `''` / `0` / `false` carries a reason comment plus a named predicate (e.g. `isReplayedUpdate_`).
+- Shared Util: no copy-pasted Telegram fetch, redact, truncate, or error branches. Route through Util helpers (`telegramApiUrl_`, `redactToken_`, `truncateDebug_`, `mapSendError_`, `describeCallbackResult_`, `getRunsHeaderIndex_`).
+- Naming and docs: private helpers end with `_`, public functions do not. Config uses `UPPER_SNAKE`, the rest uses `camelCase`. Every helper has a JSDoc line stating pure, Never throws, or silent behaviour.
+- No new trace without approval: no `Logger.log`, no extra `Runs` / `Log` writes, no new `ScriptProperties` keys unless the user approves them in a separate task.
 
 ### Testing
 

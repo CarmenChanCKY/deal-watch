@@ -47,6 +47,134 @@ const PROP_CONSECUTIVE_FAILURES = 'consecutive_send_failures';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const TELEGRAM_MAX_TEXT = 4000;
+const TELEGRAM_TRUNCATE_RESERVE = 20;
+const TELEGRAM_API_BASE = 'https://api.telegram.org/bot';
+
+const HTTP_OK_MIN = 200;
+const HTTP_OK_MAX = 300;
+const DEBUG_TRUNCATE_LEN = 200;
+const ERROR_ENTRY_MAX_LEN = 500;
+const ALERT_TRUNCATE_LEN = 300;
+
+const UNICODE_FULLWIDTH_SPACE = 0x3000;
+const UNICODE_FULLWIDTH_START = 0xFF01;
+const UNICODE_FULLWIDTH_END = 0xFF5E;
+const UNICODE_FULLWIDTH_OFFSET = 0xFEE0;
+
+const SENDER_MAX_LEN = 254;
+const INVALID_SAMPLE_MAX = 3;
+
+const MS_PER_SECOND = 1000;
+const MS_PER_DAY = 86400000;
+const LOCK_WAIT_MS = 5000;
+const TOKEN_MIN_LEN = 20;
+const SETUP_TOKEN_LEN = 32;
+
+// ---------------------------------------------------------------------------
+// Shared Util (pure, no IO; Telegram fetch/redact/truncate/error centralised)
+// ---------------------------------------------------------------------------
+
+/**
+ * Trim helper — pure, Never throws.
+ */
+function trim_(v) {
+  if (v === null || v === undefined) {
+    return '';
+  }
+  return String(v).replace(/^\s+|\s+$/g, '');
+}
+
+/**
+ * Build a Telegram Bot API URL — pure, Never throws.
+ */
+function telegramApiUrl_(token, method) {
+  return TELEGRAM_API_BASE + token + '/' + method;
+}
+
+/**
+ * Redact secrets from an error string — pure, Never throws.
+ */
+function redactToken_(text, token, secret) {
+  let out = String(text === null || text === undefined ? '' : text);
+  if (token) {
+    out = out.split(token).join('[redacted]');
+  }
+  if (secret) {
+    out = out.split(secret).join('[redacted]');
+  }
+  return out;
+}
+
+/**
+ * Truncate debug/error detail to a safe length — pure, Never throws.
+ */
+function truncateDebug_(s) {
+  return String(s === null || s === undefined ? '' : s).substring(0, DEBUG_TRUNCATE_LEN);
+}
+
+/**
+ * Map an HTTP code + Telegram body to a send error string — pure, Never throws.
+ * Returns '' when the body reports ok:true; otherwise English, no secrets.
+ */
+function mapSendError_(code, bodyText) {
+  if (code < HTTP_OK_MIN || code >= HTTP_OK_MAX) {
+    return 'Telegram HTTP ' + code + '.';
+  }
+  try {
+    const data = JSON.parse(bodyText);
+    if (data && data.ok === true) {
+      return '';
+    }
+    const desc = data && data.description ? String(data.description) : 'unknown error';
+    return 'Telegram rejected send: ' + truncateDebug_(desc);
+  } catch (e) {
+    return 'Telegram bad response (HTTP ' + code + ').';
+  }
+}
+
+/**
+ * Describe a callback/edit Telegram result — pure, Never throws.
+ */
+function describeCallbackResult_(code, bodyText) {
+  let desc = 'http=' + code;
+  try {
+    const data = JSON.parse(bodyText);
+    if (data && data.ok === true) {
+      return { ok: true, desc: 'ok' };
+    }
+    desc = data && data.description ? String(data.description).substring(0, DEBUG_TRUNCATE_LEN) : desc;
+  } catch (e2) {
+    // Keep default desc; best-effort parse only.
+  }
+  return { ok: false, desc: desc };
+}
+
+/**
+ * Find a column index by header name — pure, Never throws.
+ */
+function getColumnIndex_(headers, name, fallback) {
+  try {
+    const want = trim_(name).toLowerCase();
+    for (let c = 0; c < headers.length; c++) {
+      if (trim_(headers[c]).toLowerCase() === want) {
+        return c;
+      }
+    }
+  } catch (e) {
+    // Fall through to fallback; header scan must never throw.
+  }
+  return fallback;
+}
+
+/**
+ * Resolve Runs sent/error column indexes — pure, Never throws.
+ */
+function getRunsHeaderIndex_(headers) {
+  return {
+    sentIdx: getColumnIndex_(headers, 'sent', HEADERS_RUNS.length - 2),
+    errIdx: getColumnIndex_(headers, 'error', HEADERS_RUNS.length - 1)
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -71,6 +199,9 @@ function ensureSchema() {
   hideSheetIfOthersVisible_(ss, SHEET_RUNS);
 }
 
+/**
+ * Ensure one sheet exists with headers — Never throws (Sheet IO guarded by callers).
+ */
 function ensureSheetWithHeaders_(ss, name, headers) {
   let sheet = ss.getSheetByName(name);
   if (!sheet) {
@@ -178,19 +309,19 @@ function normalizeText(s) {
   for (let i = 0; i < out.length; i++) {
     const code = out.charCodeAt(i);
 
-    if (code === 0x3000) {
+    if (code === UNICODE_FULLWIDTH_SPACE) {
       // Full-width space
       // change to half-width space
       converted += ' ';
-    } else if (code >= 0xFF01 && code <= 0xFF5E) {
+    } else if (code >= UNICODE_FULLWIDTH_START && code <= UNICODE_FULLWIDTH_END) {
       // Full-width character
       // change to half-width character
-      converted += String.fromCharCode(code - 0xFEE0);
+      converted += String.fromCharCode(code - UNICODE_FULLWIDTH_OFFSET);
     } else {
       converted += out.charAt(i);
     }
   }
-  return converted.toLowerCase().replace(/^\s+|\s+$/g, '');
+  return trim_(converted.toLowerCase());
 }
 
 /**
@@ -204,7 +335,7 @@ function extractEmail(fromHeader) {
   const s = String(fromHeader);
   const m = s.match(/<([^<>]+)>/);
   const candidate = m ? m[1] : s;
-  return String(candidate).replace(/^\s+|\s+$/g, '');
+  return trim_(candidate);
 }
 
 /**
@@ -214,7 +345,7 @@ function extractEmail(fromHeader) {
  */
 function normalizeSenderEmail(email) {
   let s = String(email === null || email === undefined ? '' : email);
-  s = s.replace(/^\s+|\s+$/g, '').toLowerCase();
+  s = trim_(s).toLowerCase();
   const at = s.lastIndexOf('@');
   if (at < 0) {
     return s;
@@ -246,7 +377,7 @@ function isEmailSender(ruleSender) {
  * Callers pass the raw From header; extraction + normalization happen here.
  */
 function senderMatches(ruleSender, fromHeader) {
-  const rule = String(ruleSender || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+  const rule = trim_(ruleSender).toLowerCase();
   if (!rule) {
     return false;
   }
@@ -279,7 +410,7 @@ function parseKeywords(raw) {
   const parts = String(raw).split(',');
   const out = [];
   for (let i = 0; i < parts.length; i++) {
-    const item = parts[i].replace(/^\s+|\s+$/g, '');
+    const item = trim_(parts[i]);
     if (!item) {
       continue;
     }
@@ -338,7 +469,7 @@ function getPollIntervalMinutes() {
     if (raw === null || raw === undefined || raw === '') {
       return fallback;
     }
-    const n = parseInt(String(raw).replace(/^\s+|\s+$/g, ''), 10);
+    const n = parseInt(trim_(raw), 10);
     for (let i = 0; i < ALLOWED_INTERVAL_MINUTES.length; i++) {
       if (n === ALLOWED_INTERVAL_MINUTES[i]) {
         return n;
@@ -384,7 +515,7 @@ function isRuleEnabled_(value) {
     return false;
   }
   if (typeof value === 'string') {
-    const s = value.replace(/^\s+|\s+$/g, '').toLowerCase();
+    const s = trim_(value).toLowerCase();
     return s === 'true' || s === '1' || s === 'yes' || s === 'y';
   }
   return false;
@@ -398,8 +529,8 @@ function isRuleEnabled_(value) {
  * and counted in the Runs error string. IDN/non-ASCII senders are out of scope.
  */
 function isValidSender_(sender) {
-  const s = String(sender === null || sender === undefined ? '' : sender).replace(/^\s+|\s+$/g, '');
-  if (!s || s.length > 254) {
+  const s = trim_(sender);
+  if (!s || s.length > SENDER_MAX_LEN) {
     return false;
   }
   if (/\s/.test(s)) {
@@ -449,7 +580,7 @@ function loadEnabledRules() {
   const headers = values[0];
   const colIndex = {};
   for (let c = 0; c < headers.length; c++) {
-    const key = String(headers[c]).replace(/^\s+|\s+$/g, '').toLowerCase();
+    const key = trim_(headers[c]).toLowerCase();
     if (!(key in colIndex)) {
       colIndex[key] = c;
     }
@@ -468,7 +599,7 @@ function loadEnabledRules() {
     if (!isRuleEnabled_(row[enabledIdx])) {
       continue;
     }
-    const sender = String(row[senderIdx] === null || row[senderIdx] === undefined ? '' : row[senderIdx]).replace(/^\s+|\s+$/g, '');
+    const sender = trim_(row[senderIdx]);
     if (!sender) {
       continue;
     }
@@ -514,7 +645,7 @@ function buildGmailQueries(rules, newerThanMinutes) {
   const seen = {};
   const unique = [];
   for (let i = 0; i < rules.length; i++) {
-    const sender = String(rules[i].sender || '').replace(/^\s+|\s+$/g, '');
+    const sender = trim_(rules[i].sender);
     if (!sender) {
       continue;
     }
@@ -535,7 +666,7 @@ function buildGmailQueries(rules, newerThanMinutes) {
       valid.push(unique[i]);
     } else {
       invalidSkipped++;
-      if (invalidSamples.length < 3) {
+      if (invalidSamples.length < INVALID_SAMPLE_MAX) {
         invalidSamples.push(unique[i]);
       }
     }
@@ -567,18 +698,12 @@ function loadSeenMessageIds_() {
   if (!values || values.length < 2) {
     return seen;
   }
-  let msgIdx = -1;
-  for (let c = 0; c < values[0].length; c++) {
-    if (String(values[0][c]).replace(/^\s+|\s+$/g, '').toLowerCase() === 'message_id') {
-      msgIdx = c;
-      break;
-    }
-  }
+  let msgIdx = getColumnIndex_(values[0], 'message_id', -1);
   if (msgIdx < 0) {
     return seen;
   }
   for (let r = 1; r < values.length; r++) {
-    const id = String(values[r][msgIdx] === null || values[r][msgIdx] === undefined ? '' : values[r][msgIdx]).replace(/^\s+|\s+$/g, '');
+    const id = trim_(values[r][msgIdx]);
     if (id) {
       seen.add(id);
     }
@@ -641,6 +766,66 @@ function searchThreadsForQueries_(queries, maxThreads) {
 }
 
 /**
+ * Find rules whose sender matches a From header — pure, Never throws.
+ */
+function findSenderCandidates_(rules, fromHeader) {
+  const candidates = [];
+  for (let r = 0; r < rules.length; r++) {
+    if (!isValidSender_(rules[r].sender)) {
+      continue;
+    }
+    if (senderMatches(rules[r].sender, fromHeader)) {
+      candidates.push(rules[r]);
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Match candidate rules against a normalized haystack — pure, Never throws.
+ * Returns { matchedKeywords, ruleIds, senders } with keyword union dedup.
+ */
+function matchCandidatesInHaystack_(candidates, haystack) {
+  const seenKw = {};
+  const matchedKeywords = [];
+  const ruleIds = [];
+  const senders = [];
+  for (let c = 0; c < candidates.length; c++) {
+    const hits = matchKeywordsInText(haystack, candidates[c].keywords);
+    if (!hits.length) {
+      continue;
+    }
+    ruleIds.push(candidates[c].id);
+    senders.push(candidates[c].sender);
+    for (let h = 0; h < hits.length; h++) {
+      if (seenKw[hits[h].text]) {
+        continue;
+      }
+      seenKw[hits[h].text] = true;
+      matchedKeywords.push(hits[h].display);
+    }
+  }
+  return { matchedKeywords: matchedKeywords, ruleIds: ruleIds, senders: senders };
+}
+
+/**
+ * Build one per-message match entry — pure, Never throws.
+ */
+function buildMatchEntry_(threadId, messageId, fromHeader, subject, date, matched) {
+  return {
+    threadId: threadId,
+    messageId: messageId,
+    from: fromHeader,
+    fromEmail: normalizeSenderEmail(extractEmail(fromHeader)),
+    subject: subject,
+    date: date,
+    matchedKeywords: matched.matchedKeywords,
+    ruleIds: matched.ruleIds,
+    senders: matched.senders
+  };
+}
+
+/**
  * T3-b main entry: poll Gmail and return per-message matches (no writes, no send).
  * Per-message loop order (locked): Log message_id check -> own-sent ignore ->
  * sender match (candidate) -> getPlainBody + keyword match.
@@ -683,50 +868,16 @@ function pollNewMatches() {
       if (isOwnMessage_(fromHeader, ownEmail)) {
         continue;
       }
-      const candidates = [];
-      for (let r = 0; r < rules.length; r++) {
-        if (!isValidSender_(rules[r].sender)) {
-          continue;
-        }
-        if (senderMatches(rules[r].sender, fromHeader)) {
-          candidates.push(rules[r]);
-        }
-      }
+      const candidates = findSenderCandidates_(rules, fromHeader);
       if (!candidates.length) {
         continue;
       }
       const plainBody = msg.getPlainBody();
       const subject = msg.getSubject();
       const haystack = buildNormalizedHaystack(subject, plainBody);
-      const seenKw = {};
-      const matchedKeywords = [];
-      const ruleIds = [];
-      const senders = [];
-      for (let c = 0; c < candidates.length; c++) {
-        const hits = matchKeywordsInText(haystack, candidates[c].keywords);
-        if (hits.length) {
-          ruleIds.push(candidates[c].id);
-          senders.push(candidates[c].sender);
-          for (let h = 0; h < hits.length; h++) {
-            if (!seenKw[hits[h].text]) {
-              seenKw[hits[h].text] = true;
-              matchedKeywords.push(hits[h].display);
-            }
-          }
-        }
-      }
-      if (matchedKeywords.length) {
-        matches.push({
-          threadId: threadId,
-          messageId: messageId,
-          from: fromHeader,
-          fromEmail: normalizeSenderEmail(extractEmail(fromHeader)),
-          subject: subject,
-          date: msg.getDate(),
-          matchedKeywords: matchedKeywords,
-          ruleIds: ruleIds,
-          senders: senders
-        });
+      const matched = matchCandidatesInHaystack_(candidates, haystack);
+      if (matched.matchedKeywords.length) {
+        matches.push(buildMatchEntry_(threadId, messageId, fromHeader, subject, msg.getDate(), matched));
       }
     }
   }
@@ -764,6 +915,53 @@ function toTime_(d) {
 }
 
 /**
+ * Create one empty per-thread group — pure, Never throws.
+ */
+function newThreadGroup_(m) {
+  return {
+    threadId: m.threadId,
+    subject: m.subject,
+    date: m.date,
+    fromEmail: m.fromEmail,
+    matchedKeywords: [],
+    keywordSeen: {},
+    senders: [],
+    senderSeen: {},
+    messageCount: 0
+  };
+}
+
+/**
+ * Merge one message into its thread group — pure, Never throws.
+ */
+function mergeMessageIntoGroup_(g, m) {
+  g.messageCount++;
+  if (toTime_(m.date) >= toTime_(g.date)) {
+    g.subject = m.subject;
+    g.date = m.date;
+    g.fromEmail = m.fromEmail;
+  }
+  const kws = m.matchedKeywords || [];
+  for (let k = 0; k < kws.length; k++) {
+    const key = normalizeText(kws[k]);
+    if (!key || g.keywordSeen[key]) {
+      continue;
+    }
+    g.keywordSeen[key] = true;
+    g.matchedKeywords.push(kws[k]);
+  }
+  const snd = m.senders || [];
+  for (let s = 0; s < snd.length; s++) {
+    const sKey = trim_(snd[s]).toLowerCase();
+    if (!sKey || g.senderSeen[sKey]) {
+      continue;
+    }
+    g.senderSeen[sKey] = true;
+    g.senders.push(snd[s]);
+  }
+}
+
+/**
  * Collapse per-message matches into per-thread groups (pure, no IO).
  * Preserves first-seen thread order. Each group:
  * { threadId, subject, date, fromEmail, matchedKeywords, senders, messageCount }
@@ -785,44 +983,11 @@ function collapseMatchesByThread(matches) {
     }
     let g = groups[m.threadId];
     if (!g) {
-      g = {
-        threadId: m.threadId,
-        subject: m.subject,
-        date: m.date,
-        fromEmail: m.fromEmail,
-        matchedKeywords: [],
-        keywordSeen: {},
-        senders: [],
-        senderSeen: {},
-        messageCount: 0
-      };
+      g = newThreadGroup_(m);
       groups[m.threadId] = g;
       order.push(m.threadId);
     }
-    g.messageCount++;
-    if (toTime_(m.date) >= toTime_(g.date)) {
-      g.subject = m.subject;
-      g.date = m.date;
-      g.fromEmail = m.fromEmail;
-    }
-    const kws = m.matchedKeywords || [];
-    for (let k = 0; k < kws.length; k++) {
-      const key = normalizeText(kws[k]);
-      if (!key || g.keywordSeen[key]) {
-        continue;
-      }
-      g.keywordSeen[key] = true;
-      g.matchedKeywords.push(kws[k]);
-    }
-    const snd = m.senders || [];
-    for (let s = 0; s < snd.length; s++) {
-      const sKey = String(snd[s]).replace(/^\s+|\s+$/g, '').toLowerCase();
-      if (!sKey || g.senderSeen[sKey]) {
-        continue;
-      }
-      g.senderSeen[sKey] = true;
-      g.senders.push(snd[s]);
-    }
+    mergeMessageIntoGroup_(g, m);
   }
   const out = [];
   for (let i = 0; i < order.length; i++) {
@@ -885,7 +1050,7 @@ function buildDigestString(collapsedThreads) {
   lines.push('Deal Watch: ' + collapsedThreads.length + (collapsedThreads.length === 1 ? ' thread' : ' threads') + ' matched');
   for (let i = 0; i < collapsedThreads.length; i++) {
     const g = collapsedThreads[i];
-    const subject = String(g.subject === null || g.subject === undefined ? '' : g.subject).replace(/^\s+|\s+$/g, '') || '(no subject)';
+    const subject = trim_(g.subject) || '(no subject)';
     const dateStr = formatRunDate_(g.date);
     const kws = (g.matchedKeywords || []).join(', ');
     lines.push('');
@@ -969,7 +1134,7 @@ function pruneLog_(now, retentionDays) {
     if (isNaN(base.getTime())) {
       return 0;
     }
-    const cutoff = base.getTime() - days * 24 * 60 * 60 * 1000;
+    const cutoff = base.getTime() - days * MS_PER_DAY;
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_LOG);
     if (!sheet || sheet.getLastRow() < 2) {
       return 0;
@@ -978,13 +1143,7 @@ function pruneLog_(now, retentionDays) {
     if (!values || values.length < 2) {
       return 0;
     }
-    let tsIdx = 0;
-    for (let c = 0; c < values[0].length; c++) {
-      if (String(values[0][c]).replace(/^\s+|\s+$/g, '').toLowerCase() === 'timestamp') {
-        tsIdx = c;
-        break;
-      }
-    }
+    let tsIdx = getColumnIndex_(values[0], 'timestamp', 0);
     let deleted = 0;
     for (let r = values.length - 1; r >= 1; r--) {
       const cell = values[r][tsIdx];
@@ -1062,7 +1221,7 @@ const TRIGGER_HANDLER = 'runWatchAndNotify';
  * Returns the effective interval in minutes. Throws on trigger API failure.
  */
 function setPollIntervalMinutes(minutes) {
-  const n = parseInt(String(minutes).replace(/^\s+|\s+$/g, ''), 10);
+  const n = parseInt(trim_(minutes), 10);
   let valid = false;
   for (let i = 0; i < ALLOWED_INTERVAL_MINUTES.length; i++) {
     if (n === ALLOWED_INTERVAL_MINUTES[i]) {
@@ -1197,8 +1356,8 @@ function sendTelegramMessage_(text) {
   let chatId = '';
   try {
     const props = PropertiesService.getScriptProperties();
-    token = String(props.getProperty(PROP_BOT_TOKEN) || '').replace(/^\s+|\s+$/g, '');
-    chatId = String(props.getProperty(PROP_OWNER_CHAT_ID) || '').replace(/^\s+|\s+$/g, '');
+    token = trim_(props.getProperty(PROP_BOT_TOKEN));
+    chatId = trim_(props.getProperty(PROP_OWNER_CHAT_ID));
   } catch (e) {
     return { ok: false, error: 'Cannot read script properties.' };
   }
@@ -1213,7 +1372,7 @@ function sendTelegramMessage_(text) {
   }
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + token + '/sendMessage',
+      telegramApiUrl_(token, 'sendMessage'),
       {
         method: 'post',
         contentType: 'application/json',
@@ -1222,33 +1381,23 @@ function sendTelegramMessage_(text) {
       }
     );
     const code = resp.getResponseCode();
-    if (code < 200 || code >= 300) {
-      return { ok: false, error: 'Telegram HTTP ' + code + '.' };
-    }
     let body = '';
     try {
       body = resp.getContentText();
     } catch (e2) {
       body = '';
     }
-    try {
-      const data = JSON.parse(body);
-      if (data && data.ok === true) {
-        return { ok: true, error: '' };
-      }
-      const desc = data && data.description ? String(data.description).substring(0, 200) : 'unknown error';
-      return { ok: false, error: 'Telegram rejected send: ' + desc };
-    } catch (e3) {
-      return { ok: false, error: 'Telegram bad response (HTTP ' + code + ').' };
+    const mapped = mapSendError_(code, body);
+    if (!mapped) {
+      return { ok: true, error: '' };
     }
+    return { ok: false, error: mapped };
   } catch (e) {
     // UrlFetchApp messages can echo the request URL, which contains the
     // token — never return it raw. Redact before surfacing.
     let msg = e && e.message ? String(e.message) : String(e);
-    if (token) {
-      msg = msg.split(token).join('[redacted]');
-    }
-    return { ok: false, error: 'Send exception: ' + msg.substring(0, 200) };
+    msg = redactToken_(msg, token);
+    return { ok: false, error: 'Send exception: ' + truncateDebug_(msg) };
   }
 }
 
@@ -1263,13 +1412,7 @@ function readLastRunsError_() {
     }
     const lastRow = sheet.getLastRow();
     const headers = sheet.getRange(1, 1, 1, HEADERS_RUNS.length).getValues()[0];
-    let errIdx = HEADERS_RUNS.length - 1;
-    for (let c = 0; c < headers.length; c++) {
-      if (String(headers[c]).replace(/^\s+|\s+$/g, '').toLowerCase() === 'error') {
-        errIdx = c;
-        break;
-      }
-    }
+    const errIdx = getRunsHeaderIndex_(headers).errIdx;
     const v = sheet.getRange(lastRow, errIdx + 1).getValue();
     return v === null || v === undefined ? '' : String(v);
   } catch (e) {
@@ -1289,16 +1432,9 @@ function updateLastRunsRow_(sent, errorSuffix) {
     }
     const lastRow = sheet.getLastRow();
     const headers = sheet.getRange(1, 1, 1, HEADERS_RUNS.length).getValues()[0];
-    let sentIdx = HEADERS_RUNS.length - 2;
-    let errIdx = HEADERS_RUNS.length - 1;
-    for (let c = 0; c < headers.length; c++) {
-      const key = String(headers[c]).replace(/^\s+|\s+$/g, '').toLowerCase();
-      if (key === 'sent') {
-        sentIdx = c;
-      } else if (key === 'error') {
-        errIdx = c;
-      }
-    }
+    const idx = getRunsHeaderIndex_(headers);
+    const sentIdx = idx.sentIdx;
+    const errIdx = idx.errIdx;
     sheet.getRange(lastRow, sentIdx + 1).setValue(sent ? 1 : 0);
     if (errorSuffix) {
       const cur = sheet.getRange(lastRow, errIdx + 1).getValue();
@@ -1319,7 +1455,7 @@ function buildMergedMessage_(digest, errorParts) {
   const errs = [];
   if (errorParts && errorParts.length) {
     for (let i = 0; i < errorParts.length; i++) {
-      const e = String(errorParts[i] === null || errorParts[i] === undefined ? '' : errorParts[i]).replace(/^\s+|\s+$/g, '');
+      const e = trim_(errorParts[i]);
       if (e) {
         errs.push(e);
       }
@@ -1337,7 +1473,7 @@ function buildMergedMessage_(digest, errorParts) {
     out = 'Deal Watch note:\n' + errs.join(' ');
   }
   if (out.length > TELEGRAM_MAX_TEXT) {
-    out = out.substring(0, TELEGRAM_MAX_TEXT - 20) + '... (truncated)';
+    out = out.substring(0, TELEGRAM_MAX_TEXT - TELEGRAM_TRUNCATE_RESERVE) + '... (truncated)';
   }
   return out;
 }
@@ -1385,18 +1521,30 @@ const DEDUP_TTL_SECONDS = 3600;
 // silent so queued duplicates never become message spam.
 const ALREADY_SETUP_TTL_SECONDS = 600;
 
+/**
+ * Rule cache key — pure, Never throws.
+ */
 function ruleCacheKey_(id) {
   return 'rule_' + String(id);
 }
 
+/**
+ * Conversation cache key — pure, Never throws.
+ */
 function convCacheKey_(chatId) {
   return 'conv_' + String(chatId);
 }
 
+/**
+ * Dedup cache key — pure, Never throws.
+ */
 function tgUpdateKey_(updateId) {
   return 'tg_update_' + String(updateId);
 }
 
+/**
+ * Start-reply rate-limit key — pure, Never throws.
+ */
 function tgStartReplyKey_(chatId) {
   return 'tg_startreply_' + String(chatId);
 }
@@ -1455,7 +1603,7 @@ function shouldReplyAlreadySetup_(chatId) {
  */
 function withScriptLock_(fn) {
   const lock = LockService.getScriptLock();
-  lock.waitLock(5000);
+  lock.waitLock(LOCK_WAIT_MS);
   try {
     return fn();
   } finally {
@@ -1483,6 +1631,9 @@ function getConv_(chatId) {
   }
 }
 
+/**
+ * Write short-lived conversation state — Never throws (best-effort).
+ */
 function setConv_(chatId, obj) {
   try {
     CacheService.getScriptCache().put(
@@ -1495,6 +1646,9 @@ function setConv_(chatId, obj) {
   }
 }
 
+/**
+ * Clear conversation state — Never throws.
+ */
 function clearConv_(chatId) {
   try {
     CacheService.getScriptCache().remove(convCacheKey_(chatId));
@@ -1503,19 +1657,25 @@ function clearConv_(chatId) {
   }
 }
 
+/**
+ * Owner chat id or '' — Never throws.
+ */
 function getOwnerChatId_() {
   try {
     const v = PropertiesService.getScriptProperties().getProperty(PROP_OWNER_CHAT_ID);
-    return v === null || v === undefined ? '' : String(v).replace(/^\s+|\s+$/g, '');
+    return trim_(v);
   } catch (e) {
     return '';
   }
 }
 
+/**
+ * Stored bot token or '' — Never throws.
+ */
 function getStoredBotToken_() {
   try {
     const v = PropertiesService.getScriptProperties().getProperty(PROP_BOT_TOKEN);
-    return v === null || v === undefined ? '' : String(v).replace(/^\s+|\s+$/g, '');
+    return trim_(v);
   } catch (e) {
     return '';
   }
@@ -1543,8 +1703,8 @@ function maskSecret_(s) {
  * Returns { ok, error }; error never contains the token.
  */
 function sendTelegramToChat_(token, chatId, text, replyMarkup) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
-  const c = String(chatId || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
+  const c = trim_(chatId);
   if (!t) {
     return { ok: false, error: 'Missing bot_token (Setup incomplete).' };
   }
@@ -1556,7 +1716,7 @@ function sendTelegramToChat_(token, chatId, text, replyMarkup) {
   }
   let out = String(text);
   if (out.length > TELEGRAM_MAX_TEXT) {
-    out = out.substring(0, TELEGRAM_MAX_TEXT - 20) + '... (truncated)';
+    out = out.substring(0, TELEGRAM_MAX_TEXT - TELEGRAM_TRUNCATE_RESERVE) + '... (truncated)';
   }
   const payload = { chat_id: c, text: out };
   if (replyMarkup) {
@@ -1564,7 +1724,7 @@ function sendTelegramToChat_(token, chatId, text, replyMarkup) {
   }
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/sendMessage',
+      telegramApiUrl_(t, 'sendMessage'),
       {
         method: 'post',
         contentType: 'application/json',
@@ -1573,77 +1733,70 @@ function sendTelegramToChat_(token, chatId, text, replyMarkup) {
       }
     );
     const code = resp.getResponseCode();
-    if (code < 200 || code >= 300) {
-      return { ok: false, error: 'Telegram HTTP ' + code + '.' };
-    }
     let body = '';
     try {
       body = resp.getContentText();
     } catch (e2) {
       body = '';
     }
-    try {
-      const data = JSON.parse(body);
-      if (data && data.ok === true) {
-        return { ok: true, error: '' };
-      }
-      const desc = data && data.description ? String(data.description).substring(0, 200) : 'unknown error';
-      return { ok: false, error: 'Telegram rejected send: ' + desc };
-    } catch (e3) {
-      return { ok: false, error: 'Telegram bad response (HTTP ' + code + ').' };
+    const mapped = mapSendError_(code, body);
+    if (!mapped) {
+      return { ok: true, error: '' };
     }
+    return { ok: false, error: mapped };
   } catch (e) {
     let msg = e && e.message ? String(e.message) : String(e);
-    if (t) {
-      msg = msg.split(t).join('[redacted]');
-    }
-    return { ok: false, error: 'Send exception: ' + msg.substring(0, 200) };
+    msg = redactToken_(msg, t);
+    return { ok: false, error: 'Send exception: ' + truncateDebug_(msg) };
   }
 }
 
+/**
+ * Dismiss a callback spinner — Never throws (best-effort).
+ */
 function answerTelegramCallback_(token, callbackQueryId, text) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
   if (!t || !callbackQueryId) {
     return { ok: false, desc: 'skipped' };
   }
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/answerCallbackQuery',
+      telegramApiUrl_(t, 'answerCallbackQuery'),
       {
         method: 'post',
         contentType: 'application/json',
         payload: JSON.stringify({
           callback_query_id: callbackQueryId,
-          text: String(text || '').substring(0, 200)
+          text: String(text || '').substring(0, DEBUG_TRUNCATE_LEN)
         }),
         muteHttpExceptions: true
       }
     );
     const code = resp.getResponseCode();
-    let desc = 'http=' + code;
+    let body = '';
     try {
-      const data = JSON.parse(resp.getContentText());
-      if (data && data.ok === true) {
-        return { ok: true, desc: 'ok' };
-      }
-      desc = data && data.description ? String(data.description).substring(0, 200) : desc;
+      body = resp.getContentText();
     } catch (e2) {
+      body = '';
     }
-    return { ok: false, desc: desc };
+    return describeCallbackResult_(code, body);
   } catch (e) {
     // Dismissing the spinner is best-effort.
     return { ok: false, desc: 'exception' };
   }
 }
 
+/**
+ * Delete a message — Never throws (best-effort).
+ */
 function deleteTelegramMessage_(token, chatId, messageId) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
   if (!t || !chatId || !messageId) {
     return;
   }
   try {
     UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/deleteMessage',
+      telegramApiUrl_(t, 'deleteMessage'),
       {
         method: 'post',
         contentType: 'application/json',
@@ -1663,17 +1816,17 @@ function deleteTelegramMessage_(token, chatId, messageId) {
  * ignored and never throw from the webhook.
  */
 function editTelegramMessageText_(token, chatId, messageId, text) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
   if (!t || !chatId || !messageId || !text) {
     return { ok: false, desc: 'skipped' };
   }
   let out = String(text);
   if (out.length > TELEGRAM_MAX_TEXT) {
-    out = out.substring(0, TELEGRAM_MAX_TEXT - 20) + '... (truncated)';
+    out = out.substring(0, TELEGRAM_MAX_TEXT - TELEGRAM_TRUNCATE_RESERVE) + '... (truncated)';
   }
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/editMessageText',
+      telegramApiUrl_(t, 'editMessageText'),
       {
         method: 'post',
         contentType: 'application/json',
@@ -1682,16 +1835,13 @@ function editTelegramMessageText_(token, chatId, messageId, text) {
       }
     );
     const code = resp.getResponseCode();
-    let desc = 'http=' + code;
+    let body = '';
     try {
-      const data = JSON.parse(resp.getContentText());
-      if (data && data.ok === true) {
-        return { ok: true, desc: 'ok' };
-      }
-      desc = data && data.description ? String(data.description).substring(0, 200) : desc;
+      body = resp.getContentText();
     } catch (e2) {
+      body = '';
     }
-    return { ok: false, desc: desc };
+    return describeCallbackResult_(code, body);
   } catch (e) {
     // Hiding the buttons is best-effort.
     return { ok: false, desc: 'exception' };
@@ -1703,17 +1853,17 @@ function editTelegramMessageText_(token, chatId, messageId, text) {
  * Returns { ok, username, error }.
  */
 function telegramGetMe_(token) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
   if (!t) {
     return { ok: false, username: '', error: 'Empty token.' };
   }
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/getMe',
+      telegramApiUrl_(t, 'getMe'),
       { method: 'get', muteHttpExceptions: true }
     );
     const code = resp.getResponseCode();
-    if (code < 200 || code >= 300) {
+    if (code < HTTP_OK_MIN || code >= HTTP_OK_MAX) {
       return { ok: false, username: '', error: 'Telegram HTTP ' + code + '.' };
     }
     const data = JSON.parse(resp.getContentText());
@@ -1723,8 +1873,8 @@ function telegramGetMe_(token) {
     return { ok: false, username: '', error: 'Invalid bot token.' };
   } catch (e) {
     let msg = e && e.message ? String(e.message) : String(e);
-    msg = msg.split(t).join('[redacted]');
-    return { ok: false, username: '', error: msg.substring(0, 200) };
+    msg = redactToken_(msg, t);
+    return { ok: false, username: '', error: truncateDebug_(msg) };
   }
 }
 
@@ -1735,9 +1885,9 @@ function telegramGetMe_(token) {
  * the query param is what doPost actually verifies.
  */
 function telegramSetWebhook_(token, webAppUrl, secret) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
-  const base = String(webAppUrl || '').replace(/^\s+|\s+$/g, '');
-  const s = String(secret || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
+  const base = trim_(webAppUrl);
+  const s = trim_(secret);
   if (!t || !base || !s) {
     return { ok: false, error: 'Missing token, URL, or secret.' };
   }
@@ -1745,7 +1895,7 @@ function telegramSetWebhook_(token, webAppUrl, secret) {
   const url = base + sep + 'secret=' + encodeURIComponent(s);
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/setWebhook',
+      telegramApiUrl_(t, 'setWebhook'),
       {
         method: 'post',
         contentType: 'application/json',
@@ -1754,19 +1904,19 @@ function telegramSetWebhook_(token, webAppUrl, secret) {
       }
     );
     const code = resp.getResponseCode();
-    if (code < 200 || code >= 300) {
+    if (code < HTTP_OK_MIN || code >= HTTP_OK_MAX) {
       return { ok: false, error: 'Telegram HTTP ' + code + '.' };
     }
     const data = JSON.parse(resp.getContentText());
     if (data && data.ok === true) {
       return { ok: true, error: '' };
     }
-    const desc = data && data.description ? String(data.description).substring(0, 200) : 'unknown error';
+    const desc = data && data.description ? String(data.description).substring(0, DEBUG_TRUNCATE_LEN) : 'unknown error';
     return { ok: false, error: 'setWebhook rejected: ' + desc };
   } catch (e) {
     let msg = e && e.message ? String(e.message) : String(e);
-    msg = msg.split(t).join('[redacted]').split(s).join('[redacted]');
-    return { ok: false, error: msg.substring(0, 200) };
+    msg = redactToken_(msg, t, s);
+    return { ok: false, error: truncateDebug_(msg) };
   }
 }
 
@@ -1781,16 +1931,16 @@ function telegramSetWebhook_(token, webAppUrl, secret) {
  * an alert, so a broken check cannot manufacture noise.
  */
 function getQueuePending_(token) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
   if (!t) {
     return { ok: false, pending: 0 };
   }
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/getWebhookInfo',
+      telegramApiUrl_(t, 'getWebhookInfo'),
       { method: 'get', muteHttpExceptions: true }
     );
-    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) {
+    if (resp.getResponseCode() < HTTP_OK_MIN || resp.getResponseCode() >= HTTP_OK_MAX) {
       return { ok: false, pending: 0 };
     }
     const data = JSON.parse(resp.getContentText());
@@ -1814,8 +1964,8 @@ function checkQueueJam_() {
   const empty = { alert: false, pending: 0 };
   try {
     const props = PropertiesService.getScriptProperties();
-    const token = String(props.getProperty(PROP_BOT_TOKEN) || '').replace(/^\s+|\s+$/g, '');
-    const owner = String(props.getProperty(PROP_OWNER_CHAT_ID) || '').replace(/^\s+|\s+$/g, '');
+    const token = trim_(props.getProperty(PROP_BOT_TOKEN));
+    const owner = trim_(props.getProperty(PROP_OWNER_CHAT_ID));
     if (!token || !owner) {
       return empty;
     }
@@ -1825,7 +1975,7 @@ function checkQueueJam_() {
     } catch (e2) {
       lastAlert = 0;
     }
-    if (lastAlert > 0 && Date.now() - lastAlert < QUEUE_ALERT_COOLDOWN_SECONDS * 1000) {
+    if (lastAlert > 0 && Date.now() - lastAlert < QUEUE_ALERT_COOLDOWN_SECONDS * MS_PER_SECOND) {
       return empty;
     }
     const q = getQueuePending_(token);
@@ -1870,8 +2020,8 @@ function sendQueueJamAlert_(token, chatId, pending) {
  * jam alerts fresh. Never throws.
  */
 function clearQueueAndReattach_(token, chatId) {
-  const t = String(token || '').replace(/^\s+|\s+$/g, '');
-  const c = String(chatId || '').replace(/^\s+|\s+$/g, '');
+  const t = trim_(token);
+  const c = trim_(chatId);
   if (!t || !c) {
     return;
   }
@@ -1882,7 +2032,7 @@ function clearQueueAndReattach_(token, chatId) {
   }
   try {
     const resp = UrlFetchApp.fetch(
-      'https://api.telegram.org/bot' + t + '/deleteWebhook',
+      telegramApiUrl_(t, 'deleteWebhook'),
       {
         method: 'post',
         contentType: 'application/json',
@@ -1890,7 +2040,7 @@ function clearQueueAndReattach_(token, chatId) {
         muteHttpExceptions: true
       }
     );
-    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) {
+    if (resp.getResponseCode() < HTTP_OK_MIN || resp.getResponseCode() >= HTTP_OK_MAX) {
       sendTelegramToChat_(t, c, 'Clear failed (Telegram HTTP ' + resp.getResponseCode() + '). Nothing changed. Rerun Deal Watch > Setup in the Sheet.');
       return;
     }
@@ -1906,7 +2056,7 @@ function clearQueueAndReattach_(token, chatId) {
     }
   } catch (e) {
     let msg = e && e.message ? String(e.message) : String(e);
-    msg = msg.split(t).join('[redacted]').substring(0, 200);
+    msg = truncateDebug_(redactToken_(msg, t));
     sendTelegramToChat_(t, c, 'Clear failed (' + msg + '). Nothing changed. Rerun Deal Watch > Setup in the Sheet.');
     return;
   }
@@ -1914,8 +2064,8 @@ function clearQueueAndReattach_(token, chatId) {
   let secret = '';
   try {
     const props = PropertiesService.getScriptProperties();
-    webAppUrl = String(props.getProperty(PROP_WEB_APP_URL) || '').replace(/^\s+|\s+$/g, '');
-    secret = String(props.getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+    webAppUrl = trim_(props.getProperty(PROP_WEB_APP_URL));
+    secret = trim_(props.getProperty(PROP_WEBHOOK_SECRET));
   } catch (e3) {
     webAppUrl = '';
     secret = '';
@@ -1966,6 +2116,9 @@ function saveRuleCache_(sheetRow) {
   }
 }
 
+/**
+ * Delete one rule mirror entry — Never throws.
+ */
 function deleteRuleCache_(id) {
   if (!id) {
     return;
@@ -1992,19 +2145,16 @@ function nextRuleId_() {
   });
 }
 
+/**
+ * Max rule id + 1 as a string — Never throws (falls back to cache max).
+ */
 function maxRuleIdPlusOne_() {
   let max = 0;
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RULES);
     if (sheet && sheet.getLastRow() >= 2) {
       const values = sheet.getDataRange().getValues();
-      let idIdx = 0;
-      for (let c = 0; c < values[0].length; c++) {
-        if (String(values[0][c]).replace(/^\s+|\s+$/g, '').toLowerCase() === 'id') {
-          idIdx = c;
-          break;
-        }
-      }
+      const idIdx = getColumnIndex_(values[0], 'id', 0);
       for (let r = 1; r < values.length; r++) {
         const n = parseInt(String(values[r][idIdx]), 10);
         if (n > max) {
@@ -2096,6 +2246,9 @@ function restoreRulesFromCacheIfNeeded_() {
 // Sheet custom menu + one-time Setup (idempotent, Setup item only)
 // ---------------------------------------------------------------------------
 
+/**
+ * Sheet open hook — Never throws (best-effort menu).
+ */
 function onOpen() {
   try {
     SpreadsheetApp.getUi()
@@ -2130,7 +2283,7 @@ function runSheetSetup() {
     if (resp.getSelectedButton() !== ui.Button.OK) {
       return;
     }
-    token = String(resp.getResponseText() || '').replace(/^\s+|\s+$/g, '');
+    token = trim_(resp.getResponseText());
     if (!token) {
       ui.alert('Setup cancelled: empty token.');
       return;
@@ -2156,7 +2309,7 @@ function runSheetSetup() {
   try {
     ensureTrigger();
   } catch (e) {
-    ui.alert('Setup failed creating the trigger: ' + String(e && e.message ? e.message : e).substring(0, 300));
+    ui.alert('Setup failed creating the trigger: ' + String(e && e.message ? e.message : e).substring(0, ALERT_TRUNCATE_LEN));
     return;
   }
 
@@ -2165,7 +2318,7 @@ function runSheetSetup() {
   // /dev URL and anonymous Telegram calls get 401.
   let webAppUrl = '';
   try {
-    webAppUrl = String(props.getProperty(PROP_WEB_APP_URL) || '').replace(/^\s+|\s+$/g, '');
+    webAppUrl = trim_(props.getProperty(PROP_WEB_APP_URL));
   } catch (e) {
     webAppUrl = '';
   }
@@ -2179,7 +2332,7 @@ function runSheetSetup() {
       ui.alert('Setup paused: webhook not attached. Rerun Setup and paste the /exec URL.');
       return;
     }
-    webAppUrl = String(urlResp.getResponseText() || '').replace(/^\s+|\s+$/g, '');
+    webAppUrl = trim_(urlResp.getResponseText());
     if (!webAppUrl) {
       ui.alert('Setup paused: empty URL. Rerun Setup and paste the /exec URL.');
       return;
@@ -2197,7 +2350,7 @@ function runSheetSetup() {
 
   let secret = '';
   try {
-    secret = String(props.getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+    secret = trim_(props.getProperty(PROP_WEBHOOK_SECRET));
   } catch (e) {
     secret = '';
   }
@@ -2226,12 +2379,12 @@ function runSheetSetup() {
   let setupToken = '';
   let freshSetupToken = false;
   try {
-    setupToken = String(props.getProperty(PROP_SETUP_TOKEN) || '').replace(/^\s+|\s+$/g, '');
+    setupToken = trim_(props.getProperty(PROP_SETUP_TOKEN));
   } catch (e) {
     setupToken = '';
   }
   if (!setupToken) {
-    setupToken = Utilities.getUuid().replace(/-/g, '').substring(0, 32);
+    setupToken = Utilities.getUuid().replace(/-/g, '').substring(0, SETUP_TOKEN_LEN);
     props.setProperty(PROP_SETUP_TOKEN, setupToken);
     freshSetupToken = true;
   }
@@ -2275,6 +2428,48 @@ function doGet() {
 }
 
 /**
+ * True when the webhook secret mismatches — pure, Never throws.
+ */
+function hasWebhookSecretMismatch_(got, storedSecret) {
+  return !!storedSecret && got !== storedSecret;
+}
+
+/**
+ * True when the update body is missing — pure, Never throws.
+ */
+function isMissingUpdate_(update) {
+  return !update;
+}
+
+/**
+ * True when the message has no routable chat — pure, Never throws.
+ */
+function isMissingMessage_(msg) {
+  return !msg || !msg.chat;
+}
+
+/**
+ * True for non-DM chats (groups/channels) — pure, Never throws.
+ */
+function isNonPrivateChat_(chatType) {
+  return chatType !== 'private';
+}
+
+/**
+ * True when the message text is empty — pure, Never throws.
+ */
+function isEmptyText_(text) {
+  return !text;
+}
+
+/**
+ * True when a post-bind sender is not the owner — pure, Never throws.
+ */
+function isStranger_(chatId, owner) {
+  return !!owner && String(chatId) !== String(owner);
+}
+
+/**
  * Telegram webhook entry. Verifies the URL secret (?secret=...), drops
  * redelivered update_ids silently (at-least-once dedup), enforces
  * DM-only + owner allowlist (silent ignore otherwise), then routes:
@@ -2287,18 +2482,19 @@ function doPost(e) {
     const props = PropertiesService.getScriptProperties();
     let storedSecret = '';
     try {
-      storedSecret = String(props.getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+      storedSecret = trim_(props.getProperty(PROP_WEBHOOK_SECRET));
     } catch (err) {
       storedSecret = '';
     }
     if (storedSecret) {
       let got = '';
       try {
-        got = String((e && e.parameter && e.parameter.secret) || '').replace(/^\s+|\s+$/g, '');
+        got = trim_(e && e.parameter && e.parameter.secret);
       } catch (err2) {
         got = '';
       }
-      if (got !== storedSecret) {
+      if (hasWebhookSecretMismatch_(got, storedSecret)) {
+        // Silent: forged/expired webhook call — never reveal the secret.
         return telegramOk_();
       }
     }
@@ -2307,9 +2503,11 @@ function doPost(e) {
     try {
       update = JSON.parse(e.postData.contents);
     } catch (err) {
+      // Silent: unparseable body — nothing to route.
       return telegramOk_();
     }
-    if (!update) {
+    if (isMissingUpdate_(update)) {
+      // Silent: empty update — nothing to route.
       return telegramOk_();
     }
 
@@ -2318,6 +2516,7 @@ function doPost(e) {
     try {
       if (update.update_id !== undefined && update.update_id !== null && update.update_id !== '') {
         if (isDuplicateUpdate_(update.update_id)) {
+          // Silent: replayed update_id — at-least-once dedup.
           return telegramOk_();
         }
       }
@@ -2331,19 +2530,21 @@ function doPost(e) {
     }
 
     const msg = update.message;
-    if (!msg || !msg.chat) {
+    if (isMissingMessage_(msg)) {
+      // Silent: no message to route (e.g. edited/deleted payloads).
       return telegramOk_();
     }
     const chatType = String(msg.chat.type || 'private');
-    if (chatType !== 'private') {
+    if (isNonPrivateChat_(chatType)) {
       return telegramOk_(); // Groups/channels rejected silently.
     }
 
     const chatId = String(msg.chat.id);
     const token = getStoredBotToken_();
     const owner = getOwnerChatId_();
-    const text = String((msg.text || '')).replace(/^\s+|\s+$/g, '');
-    if (!text) {
+    const text = trim_(msg.text);
+    if (isEmptyText_(text)) {
+      // Silent: empty text — nothing to route.
       return telegramOk_();
     }
 
@@ -2357,7 +2558,8 @@ function doPost(e) {
     }
 
     // Post-bind: strangers silently ignored.
-    if (chatId !== owner) {
+    if (isStranger_(chatId, owner)) {
+      // Silent: non-owner DM — single-owner allowlist.
       return telegramOk_();
     }
 
@@ -2393,6 +2595,9 @@ function doPost(e) {
   }
 }
 
+/**
+ * Webhook ack — Never throws.
+ */
 function telegramOk_() {
   try {
     // HtmlService avoids the ContentService 302 path that Telegram treats
@@ -2418,14 +2623,14 @@ function handleStart_(token, chatId, text) {
     return;
   }
   const m = String(text || '').match(/^\/start(?:\s+(\S+))?/);
-  const arg = m && m[1] ? String(m[1]).replace(/^\s+|\s+$/g, '') : '';
+  const arg = m && m[1] ? trim_(m[1]) : '';
   if (!arg) {
     sendTelegramToChat_(token, chatId, 'Welcome to Deal Watch. Open the Setup link from the Sheet (Deal Watch > Setup) and tap it, or send /start <token>.');
     return;
   }
   let expected = '';
   try {
-    expected = String(props.getProperty(PROP_SETUP_TOKEN) || '').replace(/^\s+|\s+$/g, '');
+    expected = trim_(props.getProperty(PROP_SETUP_TOKEN));
   } catch (e) {
     expected = '';
   }
@@ -2443,6 +2648,9 @@ function handleStart_(token, chatId, text) {
   }
 }
 
+/**
+ * Transfer confirm prompt — Never throws.
+ */
 function handleTransferRequest_(token, chatId) {
   sendTelegramToChat_(
     token,
@@ -2457,6 +2665,9 @@ function handleTransferRequest_(token, chatId) {
   );
 }
 
+/**
+ * Connect confirm prompt — Never throws.
+ */
 function handleConnectRequest_(token, chatId) {
   sendTelegramToChat_(
     token,
@@ -2471,6 +2682,9 @@ function handleConnectRequest_(token, chatId) {
   );
 }
 
+/**
+ * Callback router — silent, Never throws.
+ */
 function handleCallback_(cb) {
   try {
     const token = getStoredBotToken_();
@@ -2498,7 +2712,7 @@ function handleCallback_(cb) {
       // owner account re-mints the token for the new device flow).
       // Simplest secure flow: mint a single-use token; the NEW account
       // claims it via /start <token>, which overwrites owner_chat_id.
-      const transferToken = Utilities.getUuid().replace(/-/g, '').substring(0, 32);
+      const transferToken = Utilities.getUuid().replace(/-/g, '').substring(0, SETUP_TOKEN_LEN);
       PropertiesService.getScriptProperties().setProperty(PROP_SETUP_TOKEN, transferToken);
       sendTelegramToChat_(
         token,
@@ -2537,8 +2751,8 @@ function handleCallback_(cb) {
  * token message immediately, and never echoes the full token.
  */
 function handleConnectToken_(token, chatId, text, incomingMessageId) {
-  const fresh = String(text || '').replace(/^\s+|\s+$/g, '');
-  if (!fresh || /\s/.test(fresh) || fresh.length < 20 || fresh.indexOf(':') < 0) {
+  const fresh = trim_(text);
+  if (!fresh || /\s/.test(fresh) || fresh.length < TOKEN_MIN_LEN || fresh.indexOf(':') < 0) {
     sendTelegramToChat_(token, chatId, 'That does not look like a BotFather token (expected digits:letters). Paste again, or send /connect to abort.');
     return;
   }
@@ -2559,14 +2773,14 @@ function handleConnectToken_(token, chatId, text, incomingMessageId) {
   // Re-attach using the stored /exec URL (never getUrl() — it returns /dev).
   let webAppUrl = '';
   try {
-    webAppUrl = String(PropertiesService.getScriptProperties().getProperty(PROP_WEB_APP_URL) || '').replace(/^\s+|\s+$/g, '');
+    webAppUrl = trim_(PropertiesService.getScriptProperties().getProperty(PROP_WEB_APP_URL));
   } catch (e) {
     webAppUrl = '';
   }
   if (webAppUrl) {
     let secret = '';
     try {
-      secret = String(PropertiesService.getScriptProperties().getProperty(PROP_WEBHOOK_SECRET) || '').replace(/^\s+|\s+$/g, '');
+      secret = trim_(PropertiesService.getScriptProperties().getProperty(PROP_WEBHOOK_SECRET));
     } catch (e) {
       secret = '';
     }
@@ -2582,32 +2796,87 @@ function handleConnectToken_(token, chatId, text, incomingMessageId) {
 }
 
 /**
+ * Collect merged error parts for the run — pure, Never throws.
+ */
+function collectWatchErrorParts_(pendingBefore, currentError, jam) {
+  const errorParts = [];
+  if (pendingBefore) {
+    errorParts.push('Previous failure: ' + pendingBefore);
+  }
+  if (currentError) {
+    errorParts.push(currentError);
+  }
+  if (jam && jam.alert) {
+    errorParts.push('Telegram queue jammed (' + jam.pending + ' pending).');
+  }
+  return errorParts;
+}
+
+/**
+ * True when the run has nothing to send — pure, Never throws.
+ */
+function hasNothingToSend_(digest, errorParts) {
+  return !digest && !(errorParts && errorParts.length);
+}
+
+/**
+ * Record a successful merged send — Never throws.
+ */
+function handleWatchSendSuccess_(toSend) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty(PROP_LAST_ERROR);
+    props.setProperty(PROP_CONSECUTIVE_FAILURES, '0');
+  } catch (e) {
+    // Ignore: send already succeeded.
+  }
+  updateLastRunsRow_(1, '');
+  return toSend;
+}
+
+/**
+ * Record a failed merged send — Never throws.
+ */
+function handleWatchSendFailure_(reason) {
+  const n = getConsecutiveFailures_() + 1;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty(PROP_CONSECUTIVE_FAILURES, String(n));
+    if (n <= MAX_CONSECUTIVE_FAILURES) {
+      const stamp = formatRunDate_(new Date());
+      const entry = ((stamp ? stamp + ' ' : '') + reason).substring(0, ERROR_ENTRY_MAX_LEN);
+      props.setProperty(PROP_LAST_ERROR, entry);
+    } else {
+      // Stop retrying stale backlog; polling continues, Runs keeps the audit.
+      props.deleteProperty(PROP_LAST_ERROR);
+    }
+  } catch (e) {
+    // Ignore: Runs still records the failure below.
+  }
+  updateLastRunsRow_(0, ('Send failed: ' + reason).substring(0, ERROR_ENTRY_MAX_LEN));
+  // Silent: send failed — digest stays unsent, error rides next run.
+  return '';
+}
+
+/**
  * Time-trigger entry point: poll -> one merged send -> Runs.sent update.
  * Silence ("" digest + no errors) sends nothing and returns "".
  * Returns the text sent, or "" when nothing was sent. Never throws.
  */
 function runWatchAndNotify() {
   try {
-    const pendingBefore = getPendingError_().replace(/^\s+|\s+$/g, '');
+    const pendingBefore = trim_(getPendingError_());
     const digest = runWatchOnce();
-    const currentError = readLastRunsError_().replace(/^\s+|\s+$/g, '');
-    const errorParts = [];
-    if (pendingBefore) {
-      errorParts.push('Previous failure: ' + pendingBefore);
-    }
-    if (currentError) {
-      errorParts.push(currentError);
-    }
+    const currentError = trim_(readLastRunsError_());
     // Queue-jam watchdog (early warning only; the clear itself needs an
     // owner tap on the alert buttons). The audit line rides the merged
     // message; the buttons ride a separate control message.
     const jam = checkQueueJam_();
     if (jam.alert) {
-      errorParts.push('Telegram queue jammed (' + jam.pending + ' pending).');
       try {
         const jamProps = PropertiesService.getScriptProperties();
-        const jamToken = String(jamProps.getProperty(PROP_BOT_TOKEN) || '').replace(/^\s+|\s+$/g, '');
-        const jamOwner = String(jamProps.getProperty(PROP_OWNER_CHAT_ID) || '').replace(/^\s+|\s+$/g, '');
+        const jamToken = trim_(jamProps.getProperty(PROP_BOT_TOKEN));
+        const jamOwner = trim_(jamProps.getProperty(PROP_OWNER_CHAT_ID));
         if (jamToken && jamOwner) {
           sendQueueJamAlert_(jamToken, jamOwner, jam.pending);
         }
@@ -2616,43 +2885,22 @@ function runWatchAndNotify() {
         // merged message when the digest send succeeds.
       }
     }
-    if (!digest && !errorParts.length) {
+    const errorParts = collectWatchErrorParts_(pendingBefore, currentError, jam);
+    if (hasNothingToSend_(digest, errorParts)) {
+      // Silent: zero-match with no pending/current/jam errors — nothing to send.
       return '';
     }
     const toSend = buildMergedMessage_(digest, errorParts);
     if (!toSend) {
+      // Silent: merged message collapsed to empty — nothing to send.
       return '';
     }
     const result = sendTelegramMessage_(toSend);
     if (result && result.ok) {
-      try {
-        const props = PropertiesService.getScriptProperties();
-        props.deleteProperty(PROP_LAST_ERROR);
-        props.setProperty(PROP_CONSECUTIVE_FAILURES, '0');
-      } catch (e) {
-        // Ignore: send already succeeded.
-      }
-      updateLastRunsRow_(1, '');
-      return toSend;
+      return handleWatchSendSuccess_(toSend);
     }
     const reason = result && result.error ? String(result.error) : 'Send failed.';
-    const n = getConsecutiveFailures_() + 1;
-    try {
-      const props = PropertiesService.getScriptProperties();
-      props.setProperty(PROP_CONSECUTIVE_FAILURES, String(n));
-      if (n <= MAX_CONSECUTIVE_FAILURES) {
-        const stamp = formatRunDate_(new Date());
-        const entry = ((stamp ? stamp + ' ' : '') + reason).substring(0, 500);
-        props.setProperty(PROP_LAST_ERROR, entry);
-      } else {
-        // Stop retrying stale backlog; polling continues, Runs keeps the audit.
-        props.deleteProperty(PROP_LAST_ERROR);
-      }
-    } catch (e) {
-      // Ignore: Runs still records the failure below.
-    }
-    updateLastRunsRow_(0, ('Send failed: ' + reason).substring(0, 500));
-    return '';
+    return handleWatchSendFailure_(reason);
   } catch (e) {
     return '';
   }
