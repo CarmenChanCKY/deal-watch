@@ -636,3 +636,65 @@ A second incident compounded it: the `deleteWebhook?drop_pending_updates=true` c
 **Why.** The ack response shape was the bug. Fixing the ack stops retries at the source; the watchdog drops from primary fix to fallback. Threshold stays `3` — `pending: 1` blips are still possible on platform hiccups.
 
 **Result.** `test/T4-TestingPlan.md` 4b updated to the new fingerprint (`pending 0`); no `CONTEXT.md` change (behavioural hardening, not structural).
+
+## 33. T5-c/d/e locked through grill (menu, CRUD shape, no reply keyboard)
+
+**Problem.** T5-a/b left rule CRUD and interval/status/help undefined, plus the owner asked whether Telegram can avoid typing commands like `/transfer`.
+
+**Options considered.** `setMyCommands` menu vs persistent reply keyboard vs inline-only; add-rule step count; detail button set; keyword validation reuse; unknown-command reply.
+
+**How AI was used.** `grilling` interview in rounds; codebase check confirmed `doPost` stubbed `/list|add|rules|interval|status|help` as `Not yet in this slice`, `LIST_PAGE_SIZE=10` defined but unused, interval backend existed with no Telegram wiring, and only `inline_keyboard` was ever sent (no `setMyCommands`, no reply keyboard).
+
+**Decision.** Owner locked: T5-c = rule CRUD (add sender → keywords → confirm, `[Use last keywords]` when a prior rule exists, `/list` 10/page → detail with Enable/Disable + Edit keywords/sender + Delete-confirm, duplicate sender → edit, 30-enabled block at entry, `parseKeywords` validation, empty rejected); T5-d = interval inline fixed dropdown + status (interval + rule count + last run + `last_error`) + help + `setMyCommands` menu (`/list` `/add` `/interval` `/status` `/help` `/transfer` `/connect`, set in Setup/re-attach) + unknown → short help (strangers/groups stay silent); T5-e = `T5-TestingPlan.md` + `TestT5.gs`; English-first; `conv_<chat_id>` 10-min TTL + `max+1` under lock reused.
+
+**Why.** Menu plus inline covers no-typing without a second persistent keyboard to maintain; reusing `parseKeywords` and conv/lock infra keeps one semantics and one state model.
+
+**Result.** Recorded in `CONTEXT.md` (UI + T5 plan); persistent reply keyboard rejected permanently; T5-c implementation next.
+
+## 34. T5-c rule CRUD + T5-d interval/status/help implemented
+
+**Problem.** Build the locked T5-c/d scope in `src/Code.gs` without touching T3/T4 behaviour.
+
+**Options considered.** One button per list row vs two; edit-in-place pagination (needs button-preserving edit) vs new message per tap; `setMyCommands` in Setup only vs Setup + `/connect`.
+
+**How AI was used.** AI implemented in slices; the owner decided: list buttons two per row (`LIST_BUTTONS_PER_ROW = 2`), detail Back returns to page 0 (accepted as-is, no page-carrying callback).
+
+**Decision.**
+
+- T5-c: data layer (`loadAllRules_`, `findRuleById_/BySender_` with `+tag`-aware `isSameSender_`, `max+1` append / update / delete under `ScriptLock` + `rule_<id>` cache sync, `Log` untouched) + add flow (sender → keywords → confirm, `[Use last keywords]`, duplicate → update, 30-enabled block at entry/confirm/enable, corrupt-conv guards) + `/list` 10/page (2/row, in-place Prev/Next) + detail (Enable/Disable, Edit keywords/sender, Delete-confirm) + `/cancel`; `editTelegramMessageText_` gained an optional keep-buttons param (omitted = clear, as before).
+- T5-d: `/interval` fixed dropdown (current marked, `setPollIntervalMinutes_` rebuilds the trigger, failure rolls back with a retry message) + `/status` (interval, rule counts, last `Runs` row, `last_error`) + `/help` + `setMyCommands` menu (7 commands, set in Setup and after `/connect`, best-effort silent) + stub shrunk to T6 only.
+- Style notes: every helper has a JSDoc purity line; no new `ScriptProperties` keys, no `Logger`, no `Runs`/`Log` writes; unknown callbacks/values stay silent per convention.
+
+**Why.** Reused `parseKeywords`/`isValidSender_`/`conv_` TTL/`withScriptLock_` instead of parallel implementations; menu failures stay silent because typed commands remain and the next Setup rerun retries.
+
+**Result.** `src/Code.gs` extended, T3/T4 texts and silent paths untouched; owner verifies on a test copy; T5-e (TestingPlan + runner) next.
+
+## 35. T5-e acceptance pack (TestingPlan + runner)
+
+**Problem.** T5-c/d had code but no repeatable verification; Telegram UX is inherently manual, yet layout/predicate logic can be asserted headlessly.
+
+**Decision.** Owner-confirmed split, same one-paste-one-run pattern as T3/T4:
+
+- `test/TestT5.gs`: pure checks (`isSameSender_` +tag/case, `hasKeywords_`, 30-entry `isRuleLimitReached_` gate shared by entry/confirm/enable, clamp, interval labels, 2-per-row layout incl. nav rows, detail Enable/Disable flip) + one self-cleaning Sheet round-trip (`t5test.example.com` append → find → update → delete → cache gone) + `seedT5PagingRules` / `cleanupT5TestRules` helpers for the 11-row paging eyeball. No Telegram sends, no Gmail reads, no new Properties keys.
+- `test/T5-TestingPlan.md`: prep + runner boxes + manual `/add` (invalid/empty/cancel/uselast/duplicate-case) + `/list`/detail (toggle/edit/delete-confirm/Back-to-page-1) + paging seed eyeball + interval (trigger eyeball, Cancel clears buttons, restore 15) / status / help / Menu / unknown + ordered cleanup. The live 30-rule block stays runner-predicate-only (seeding 30 by hand not worth it).
+
+**Why.** The runner removes per-function manual runs; the checklist removes memory dependence; temp senders (`t5page*`, `t5test`) keep test rows identifiable for cleanup.
+
+**Result.** T5 verifiable in one repeatable pass; runner deleted from the editor after use, repo copy stays source of truth.
+
+## 36. Rules updated_at timezone alignment (sheet vs script vs TG)
+
+**Problem.** `/list` → rule detail showed `Updated: Fri Oct 16 2026 07:12:00 GMT+0800` while the Excel `updated_at` cell showed `2026-10-15 16:12` — 15 hours apart plus a format mismatch (`Date.toString()` vs `yyyy-MM-dd HH:mm`).
+
+**How AI was used.** Codebase check traced the split: writes go through `formatRunDate_(new Date())` (script TZ, `Asia/Hong_Kong`) as a string, Sheets coerces it to a `Date` interpreted in the *spreadsheet* TZ, and `loadAllRules_` read it back with a bare `String(...)`. The 15h gap (PDT UTC-7 vs HKT UTC+8 in October) fingered the spreadsheet TZ; the owner confirmed the Sheet was on US Pacific while the script was on `Asia/Hong_Kong`. `getLastRunsRow_` already handled `instanceof Date` correctly — only the rules path did not.
+
+**Options considered.** A: store plain text / read display values (Excel untouched); B: move the Sheet to `Asia/Hong_Kong` (old rows shift ~15h display, accepted as test data); C: UTC+0 Sheet with TG following the phone (rejected — Telegram Bot API sends static text and exposes no user timezone, so auto-follow is impossible; per-chat `/tz` prefs would need new Properties keys and a UTC rewrite for zero benefit since the bot is single-owner on a HK phone, where B already equals phone time).
+
+**Decision.** Owner chose B, in slices:
+
+- **Task 1.** Shared Util gained `isSheetDate_` + `formatSheetStamp_` (Date → `formatRunDate_`, blank → `''` with reason comment, else `String(v)`); `loadAllRules_` uses it for `updatedAt`; `getLastRunsRow_` inlined ternary extracted to the same helper (output-identical, verified by reading).
+- **Task 2.** Config gained `SPREADSHEET_TIME_ZONE = 'Asia/Hong_Kong'`; `ensureSchema()` calls `ensureSpreadsheetTimeZone_` (guarded by `isTimeZoneAligned_`, best-effort, Never throws, no new trace/keys); `formatRunDate_` fallback literal routed to the constant (same value). Write paths untouched — once parse/display/format agree, coercion is harmless.
+
+**Why.** One canonical TZ everywhere removes the parse-vs-display-vs-format split at the source; enforcement in `ensureSchema` stops future drift; per-user TZ machinery is overkill for one HK owner.
+
+**Result.** Owner verified live: add/edit a rule → Excel `updated_at` and TG `Updated:` both show the same HK `yyyy-MM-dd HH:mm`. No `CONTEXT.md` change (bug fix, not structural).

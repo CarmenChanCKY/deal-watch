@@ -7,6 +7,9 @@
  * - T3-c: digest collapse + digest string + Log/Runs writes + 30-day prune (no send).
  * - T4-a: trigger management (ensureTrigger + setPollIntervalMinutes).
  * - T4-b: one merged send + last_error + stop-after-3 (runWatchAndNotify).
+ * - T5-a/b: doPost router + Setup/bind/transfer/connect (see inbound section).
+ * - T5-c: rule CRUD (/add flow, /list pages, detail inline buttons).
+ * - T5-d: interval/status/help + setMyCommands menu.
  *
  * Conventions follow CONTEXT.md:
  * - Rules: id | sender | keywords (OR, comma) | enabled | topic_hint | updated_at
@@ -24,6 +27,9 @@
 const SHEET_RULES = 'Rules';
 const SHEET_LOG = 'Log';
 const SHEET_RUNS = 'Runs';
+
+// Canonical display time zone; script (appsscript.json) and spreadsheet must agree.
+const SPREADSHEET_TIME_ZONE = 'Asia/Hong_Kong';
 
 // sheet header list
 const HEADERS_RULES = ['id', 'sender', 'keywords', 'enabled', 'topic_hint', 'updated_at'];
@@ -176,6 +182,26 @@ function getRunsHeaderIndex_(headers) {
   };
 }
 
+/**
+ * True when a Sheet cell value is a Date object — pure, Never throws.
+ */
+function isSheetDate_(v) {
+  return v instanceof Date;
+}
+
+/**
+ * Format a Sheet cell stamp for display — pure, Never throws.
+ */
+function formatSheetStamp_(v) {
+  if (isSheetDate_(v)) {
+    return formatRunDate_(v);
+  }
+  if (v === null || v === undefined) {
+    return ''; // Blank cell has no stamp to show.
+  }
+  return String(v);
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -185,11 +211,13 @@ const SHEET_HOME = 'Home';
 /**
  * Idempotent schema provisioning: creates Rules/Log/Runs with headers when
  * missing, then hides them. Never writes example rows; never overwrites data.
+ * Also aligns the spreadsheet time zone with Config (display-only, data kept).
  * Safe to call on every startup (open trigger / Setup rerun).
  * A visible Home sheet is kept because Sheets forbids hiding every sheet.
  */
 function ensureSchema() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureSpreadsheetTimeZone_(ss);
   ensureSheetWithHeaders_(ss, SHEET_RULES, HEADERS_RULES);
   ensureSheetWithHeaders_(ss, SHEET_LOG, HEADERS_LOG);
   ensureSheetWithHeaders_(ss, SHEET_RUNS, HEADERS_RUNS);
@@ -197,6 +225,31 @@ function ensureSchema() {
   hideSheetIfOthersVisible_(ss, SHEET_RULES);
   hideSheetIfOthersVisible_(ss, SHEET_LOG);
   hideSheetIfOthersVisible_(ss, SHEET_RUNS);
+}
+
+/**
+ * True when the spreadsheet time zone already matches Config — Never throws.
+ */
+function isTimeZoneAligned_(ss) {
+  try {
+    return !!ss && ss.getSpreadsheetTimeZone() === SPREADSHEET_TIME_ZONE;
+  } catch (e) {
+    return true; // Unreadable state; stay a silent no-op rather than risk a write.
+  }
+}
+
+/**
+ * Align the spreadsheet time zone with Config — best-effort, Never throws.
+ */
+function ensureSpreadsheetTimeZone_(ss) {
+  if (isTimeZoneAligned_(ss)) {
+    return; // Already aligned or unreadable; silent no-op.
+  }
+  try {
+    ss.setSpreadsheetTimeZone(SPREADSHEET_TIME_ZONE);
+  } catch (e) {
+    // Best-effort only; per-call formatting still falls back to the script time zone.
+  }
 }
 
 /**
@@ -1022,7 +1075,7 @@ function formatRunDate_(d) {
     if (isNaN(date.getTime())) {
       return '';
     }
-    let tz = 'Asia/Hong_Kong';
+    let tz = SPREADSHEET_TIME_ZONE;
     try {
       tz = Session.getScriptTimeZone() || tz;
     } catch (e) {
@@ -1513,6 +1566,7 @@ const PROP_QUEUE_ALERT_AT = 'queue_alert_at';
 
 const CONV_TTL_SECONDS = 600;
 const LIST_PAGE_SIZE = 10;
+const LIST_BUTTONS_PER_ROW = 2;
 
 // Telegram at-least-once delivery: the same update_id may arrive several
 // times (retry / queue flush). Replays are dropped silently (see doPost).
@@ -1810,12 +1864,12 @@ function deleteTelegramMessage_(token, chatId, messageId) {
 }
 
 /**
- * Replace an inline-button message's text and drop its buttons in one call.
- * Omitting reply_markup clears the inline keyboard, so the buttons cannot
+ * Replace an inline-button message's text, optionally keeping buttons.
+ * Omitting replyMarkup clears the inline keyboard, so the buttons cannot
  * be tapped twice. Best-effort: edit failures (too old, not modified) are
- * ignored and never throw from the webhook.
+ * ignored and never throw from the webhook. Never throws.
  */
-function editTelegramMessageText_(token, chatId, messageId, text) {
+function editTelegramMessageText_(token, chatId, messageId, text, replyMarkup) {
   const t = trim_(token);
   if (!t || !chatId || !messageId || !text) {
     return { ok: false, desc: 'skipped' };
@@ -1825,12 +1879,16 @@ function editTelegramMessageText_(token, chatId, messageId, text) {
     out = out.substring(0, TELEGRAM_MAX_TEXT - TELEGRAM_TRUNCATE_RESERVE) + '... (truncated)';
   }
   try {
+    const payload = { chat_id: String(chatId), message_id: messageId, text: out };
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
+    }
     const resp = UrlFetchApp.fetch(
       telegramApiUrl_(t, 'editMessageText'),
       {
         method: 'post',
         contentType: 'application/json',
-        payload: JSON.stringify({ chat_id: String(chatId), message_id: messageId, text: out }),
+        payload: JSON.stringify(payload),
         muteHttpExceptions: true
       }
     );
@@ -2243,6 +2301,256 @@ function restoreRulesFromCacheIfNeeded_() {
 }
 
 // ---------------------------------------------------------------------------
+// T5-c: rule CRUD data layer (Sheet is the mirror; rule_<id> cache updated
+// on every write; Log rows are never touched by rule edits/deletes)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read all Rules rows in sheet order — Never throws ([] on failure).
+ */
+function loadAllRules_() {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RULES);
+    if (!sheet || sheet.getLastRow() < 2) {
+      return [];
+    }
+    const values = sheet.getDataRange().getValues();
+    if (!values || values.length < 2) {
+      return [];
+    }
+    const headers = values[0];
+    const idIdx = getColumnIndex_(headers, 'id', 0);
+    const senderIdx = getColumnIndex_(headers, 'sender', 1);
+    const kwIdx = getColumnIndex_(headers, 'keywords', 2);
+    const enIdx = getColumnIndex_(headers, 'enabled', 3);
+    const topicIdx = getColumnIndex_(headers, 'topic_hint', 4);
+    const updIdx = getColumnIndex_(headers, 'updated_at', 5);
+    const out = [];
+    for (let r = 1; r < values.length; r++) {
+      const row = values[r];
+      const id = trim_(row[idIdx]);
+      const sender = trim_(row[senderIdx]);
+      if (!id || !sender) {
+        continue;
+      }
+      out.push({
+        row: r + 1,
+        id: String(id),
+        sender: String(sender),
+        keywordsRaw: String(row[kwIdx] === null || row[kwIdx] === undefined ? '' : row[kwIdx]),
+        enabled: isRuleEnabled_(row[enIdx]),
+        topicHint: topicIdx < 0 ? '' : String(row[topicIdx] === null || row[topicIdx] === undefined ? '' : row[topicIdx]),
+        updatedAt: updIdx < 0 ? '' : formatSheetStamp_(row[updIdx])
+      });
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Find one rule by id — Never throws (null when missing).
+ */
+function findRuleById_(id) {
+  try {
+    const rules = loadAllRules_();
+    for (let i = 0; i < rules.length; i++) {
+      if (String(rules[i].id) === String(id)) {
+        return rules[i];
+      }
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Find one rule by sender (natural key) — Never throws (null when missing).
+ */
+function findRuleBySender_(sender) {
+  try {
+    const rules = loadAllRules_();
+    for (let i = 0; i < rules.length; i++) {
+      if (isSameSender_(rules[i].sender, sender)) {
+        return rules[i];
+      }
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * True when two sender values identify the same watched sender — pure, Never throws.
+ */
+function isSameSender_(a, b) {
+  const x = trim_(a);
+  const y = trim_(b);
+  if (!x || !y) {
+    return false;
+  }
+  if (isEmailSender(x) && isEmailSender(y)) {
+    return normalizeSenderEmail(x) === normalizeSenderEmail(y);
+  }
+  return x.toLowerCase() === y.toLowerCase();
+}
+
+/**
+ * True when raw keywords parse to at least one entry — pure, Never throws.
+ */
+function hasKeywords_(raw) {
+  try {
+    return parseKeywords(raw).length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * True when enabled rules already reach the entry cap — pure, Never throws.
+ */
+function isRuleLimitReached_(rules) {
+  let n = 0;
+  if (rules) {
+    for (let i = 0; i < rules.length; i++) {
+      if (rules[i] && rules[i].enabled) {
+        n++;
+      }
+    }
+  }
+  return n >= MAX_SENDERS;
+}
+
+/**
+ * Most recently created rule (max numeric id) — Never throws (null when none).
+ */
+function getLastRule_() {
+  try {
+    const rules = loadAllRules_();
+    let best = null;
+    let bestN = 0;
+    for (let i = 0; i < rules.length; i++) {
+      const n = parseInt(String(rules[i].id), 10);
+      if (n > bestN) {
+        bestN = n;
+        best = rules[i];
+      }
+    }
+    return best;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Append one enabled rule under lock — Never throws ({ ok, id, error }).
+ */
+function appendRule_(sender, keywordsRaw) {
+  try {
+    return withScriptLock_(function () {
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RULES);
+      if (!sheet) {
+        return { ok: false, id: '', error: 'Rules sheet is missing. Rerun Setup.' };
+      }
+      const id = maxRuleIdPlusOne_();
+      const now = formatRunDate_(new Date());
+      sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS_RULES.length).setValues([[id, sender, keywordsRaw, true, '', now]]);
+      saveRuleCache_({ id: id, sender: sender, keywordsRaw: keywordsRaw, enabled: true, topicHint: '', updatedAt: now });
+      return { ok: true, id: id, error: '' };
+    });
+  } catch (e) {
+    return { ok: false, id: '', error: 'Could not write the sheet. Try again.' };
+  }
+}
+
+/**
+ * Update one rule by id under lock — Never throws ({ ok, error }).
+ */
+function updateRuleById_(id, fields) {
+  try {
+    return withScriptLock_(function () {
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RULES);
+      if (!sheet || sheet.getLastRow() < 2) {
+        return { ok: false, error: 'Rules sheet is missing. Rerun Setup.' };
+      }
+      const values = sheet.getDataRange().getValues();
+      const headers = values[0];
+      const idIdx = getColumnIndex_(headers, 'id', 0);
+      const senderIdx = getColumnIndex_(headers, 'sender', 1);
+      const kwIdx = getColumnIndex_(headers, 'keywords', 2);
+      const enIdx = getColumnIndex_(headers, 'enabled', 3);
+      const topicIdx = getColumnIndex_(headers, 'topic_hint', 4);
+      const updIdx = getColumnIndex_(headers, 'updated_at', 5);
+      let targetRow = -1;
+      for (let r = 1; r < values.length; r++) {
+        if (String(trim_(values[r][idIdx])) === String(id)) {
+          targetRow = r + 1;
+          break;
+        }
+      }
+      if (targetRow < 0) {
+        return { ok: false, error: 'Rule not found.' };
+      }
+      const now = formatRunDate_(new Date());
+      const cur = sheet.getRange(targetRow, 1, 1, HEADERS_RULES.length).getValues()[0];
+      let sender = String(cur[senderIdx]);
+      let keywordsRaw = String(cur[kwIdx]);
+      let enabled = isRuleEnabled_(cur[enIdx]);
+      const f = fields || {};
+      if (f.sender !== undefined) {
+        sender = String(f.sender);
+        sheet.getRange(targetRow, senderIdx + 1).setValue(sender);
+      }
+      if (f.keywordsRaw !== undefined) {
+        keywordsRaw = String(f.keywordsRaw);
+        sheet.getRange(targetRow, kwIdx + 1).setValue(keywordsRaw);
+      }
+      if (f.enabled !== undefined) {
+        enabled = !!f.enabled;
+        sheet.getRange(targetRow, enIdx + 1).setValue(enabled);
+      }
+      sheet.getRange(targetRow, updIdx + 1).setValue(now);
+      const topicHint = topicIdx < 0 ? '' : String(cur[topicIdx]);
+      saveRuleCache_({ id: String(id), sender: sender, keywordsRaw: keywordsRaw, enabled: enabled, topicHint: topicHint, updatedAt: now });
+      return { ok: true, error: '' };
+    });
+  } catch (e) {
+    return { ok: false, error: 'Could not write the sheet. Try again.' };
+  }
+}
+
+/**
+ * Delete one rule row by id under lock (Log rows kept) — Never throws ({ ok, sender, error }).
+ */
+function deleteRuleById_(id) {
+  try {
+    return withScriptLock_(function () {
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RULES);
+      if (!sheet || sheet.getLastRow() < 2) {
+        return { ok: false, sender: '', error: 'Rules sheet is missing. Rerun Setup.' };
+      }
+      const values = sheet.getDataRange().getValues();
+      const idIdx = getColumnIndex_(values[0], 'id', 0);
+      const senderIdx = getColumnIndex_(values[0], 'sender', 1);
+      for (let r = 1; r < values.length; r++) {
+        if (String(trim_(values[r][idIdx])) === String(id)) {
+          const sender = String(values[r][senderIdx]);
+          sheet.deleteRow(r + 1);
+          deleteRuleCache_(id);
+          return { ok: true, sender: sender, error: '' };
+        }
+      }
+      return { ok: false, sender: '', error: 'Rule not found.' };
+    });
+  } catch (e) {
+    return { ok: false, sender: '', error: 'Could not write the sheet. Try again.' };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Sheet custom menu + one-time Setup (idempotent, Setup item only)
 // ---------------------------------------------------------------------------
 
@@ -2364,6 +2672,9 @@ function runSheetSetup() {
     ui.alert('Trigger is set, but setWebhook failed: ' + wh.error + '\nCheck the pasted /exec URL (to replace it, delete the webapp_url row in Script Properties and rerun Setup).');
     return;
   }
+  // Command menu is best-effort: typed commands keep working and the next
+  // Setup rerun retries, so a menu failure never blocks Setup.
+  telegramSetMyCommands_(token);
 
   if (owner) {
     ui.alert(
@@ -2410,7 +2721,7 @@ function runSheetSetup() {
 }
 
 // ---------------------------------------------------------------------------
-// Inbound webhook router (T5-a skeleton + T5-b Setup flows)
+// Inbound webhook router (T5-a router + T5-b Setup flows + T5-c rule CRUD)
 // ---------------------------------------------------------------------------
 
 /**
@@ -2473,9 +2784,9 @@ function isStranger_(chatId, owner) {
  * Telegram webhook entry. Verifies the URL secret (?secret=...), drops
  * redelivered update_ids silently (at-least-once dedup), enforces
  * DM-only + owner allowlist (silent ignore otherwise), then routes:
- * /start, /transfer, /connect (+ callbacks). Rule CRUD (T5-c) and
- * interval/status (T5-d) reply that they arrive next to avoid silent dead
- * ends during the sliced rollout.
+ * /start, /transfer, /connect, /add, /list (+ callbacks). Interval/status
+ * (T5-d) still reply that they arrive next to avoid silent dead ends
+ * during the sliced rollout.
  */
 function doPost(e) {
   try {
@@ -2563,10 +2874,21 @@ function doPost(e) {
       return telegramOk_();
     }
 
+    if (/^\/cancel(\s|$)/.test(text)) {
+      clearConv_(chatId);
+      sendTelegramToChat_(token, chatId, 'Cancelled. Nothing changed.');
+      return telegramOk_();
+    }
+
     // Owner conv continuation first (e.g. /connect awaiting new token).
     const conv = getConv_(chatId);
     if (conv && conv.step === 'await_new_token' && !/^\/\w/.test(text)) {
       handleConnectToken_(token, chatId, text, msg.message_id);
+      return telegramOk_();
+    }
+    // Add/edit continuation (non-command text only; slash commands route below).
+    if (conv && conv.step && conv.step !== 'await_new_token' && !/^\/\w/.test(text)) {
+      handleRuleConv_(token, chatId, text, conv);
       return telegramOk_();
     }
 
@@ -2576,17 +2898,27 @@ function doPost(e) {
       handleTransferRequest_(token, chatId);
     } else if (/^\/connect(\s|$)/.test(text)) {
       handleConnectRequest_(token, chatId);
-    } else if (/^\/(list|add|rules|interval|status|help|suggest|setkey|setmodel)(\s|$)/.test(text)) {
+    } else if (/^\/add(\s|$)/.test(text)) {
+      handleAddStart_(token, chatId);
+    } else if (/^\/(list|rules)(\s|$)/.test(text)) {
+      handleList_(token, chatId, 0);
+    } else if (/^\/interval(\s|$)/.test(text)) {
+      handleInterval_(token, chatId);
+    } else if (/^\/status(\s|$)/.test(text)) {
+      handleStatus_(token, chatId);
+    } else if (/^\/help(\s|$)/.test(text)) {
+      handleHelp_(token, chatId);
+    } else if (/^\/(suggest|setkey|setmodel)(\s|$)/.test(text)) {
       sendTelegramToChat_(
         token,
         chatId,
-        'Not yet in this slice: rule management (T5-c) and interval/status (T5-d) arrive next. Available now: /transfer, /connect.'
+        'Not yet in this slice: suggestions/keys (T6) arrive next. Available now: /list, /add, /interval, /status, /help, /transfer, /connect.'
       );
     } else {
       sendTelegramToChat_(
         token,
         chatId,
-        'Unknown command. Available now: /transfer, /connect. Buttons arrive with rule management (T5-c).'
+        'Unknown command. Available: /list, /add, /interval, /status, /help, /transfer, /connect.'
       );
     }
     return telegramOk_();
@@ -2737,6 +3069,10 @@ function handleCallback_(cb) {
     } else if (data === 'queue:no') {
       answerTelegramCallback_(token, qid, 'Cancelled');
       editTelegramMessageText_(token, chatId, messageId, 'Nothing changed. I will remind you again in 12 hours if the queue is still jammed.');
+    } else if (data === 'add:confirm' || data === 'add:cancel' || data === 'add:uselast' || (data && data.indexOf('rule:') === 0)) {
+      handleRuleCallback_(token, chatId, data, messageId, qid);
+    } else if (data && data.indexOf('interval:') === 0) {
+      handleIntervalCallback_(token, chatId, data.substring('interval:'.length), messageId, qid);
     } else if (data) {
       // Unknown callback: stay silent.
     }
@@ -2792,7 +3128,747 @@ function handleConnectToken_(token, chatId, text, incomingMessageId) {
       }
     }
   }
+  // Command menu follows the new token (best-effort, same as Setup).
+  telegramSetMyCommands_(fresh);
   sendTelegramToChat_(token, chatId, 'Token replaced (' + maskSecret_(fresh) + '). Webhook re-attached. The old token stops working.');
+}
+
+// ---------------------------------------------------------------------------
+// T5-c: rule CRUD Telegram flows (English-first; conv_<chat_id> 10-min TTL)
+// ---------------------------------------------------------------------------
+
+/**
+ * Start add-rule flow (1/3 sender) — Never throws.
+ */
+function handleAddStart_(token, chatId) {
+  const rules = loadAllRules_();
+  if (isRuleLimitReached_(rules)) {
+    sendTelegramToChat_(token, chatId, 'Rule limit reached (30 enabled). Disable or delete a rule before adding.');
+    return;
+  }
+  setConv_(chatId, { step: 'await_sender' });
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'Add rule (1/3): send the sender - a domain (xxx.com) or full email (abc@xxx.com). Send /cancel to abort.',
+    { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] }
+  );
+}
+
+/**
+ * Send one /list page as a new message — Never throws.
+ */
+function handleList_(token, chatId, page) {
+  showListPage_(token, chatId, page, null);
+}
+
+/**
+ * Clamp a list page into range — pure, Never throws.
+ */
+function clampListPage_(page, totalPages) {
+  let p = parseInt(String(page), 10);
+  if (!(p >= 0)) {
+    p = 0;
+  }
+  if (p > totalPages - 1) {
+    p = totalPages - 1;
+  }
+  if (p < 0) {
+    p = 0;
+  }
+  return p;
+}
+
+/**
+ * Build list page text + keyboard — pure, Never throws.
+ */
+function buildListPage_(rules, page) {
+  const total = rules ? rules.length : 0;
+  if (!total) {
+    return { text: 'No rules yet. Send /add to create one.', keyboard: null, totalPages: 1, page: 0 };
+  }
+  let totalPages = Math.ceil(total / LIST_PAGE_SIZE);
+  if (!(totalPages > 0)) {
+    totalPages = 1;
+  }
+  const p = clampListPage_(page, totalPages);
+  const start = p * LIST_PAGE_SIZE;
+  const end = Math.min(start + LIST_PAGE_SIZE, total);
+  const lines = ['Rules (page ' + (p + 1) + '/' + totalPages + '):'];
+  const keyboard = [];
+  let row = [];
+  for (let i = start; i < end; i++) {
+    const n = i - start + 1;
+    const r = rules[i];
+    lines.push(n + '. ' + r.sender + ' - ' + r.keywordsRaw + ' [' + (r.enabled ? 'ON' : 'OFF') + ']');
+    row.push({ text: String(n), callback_data: 'rule:view:' + r.id });
+    if (row.length >= LIST_BUTTONS_PER_ROW) {
+      keyboard.push(row);
+      row = [];
+    }
+  }
+  if (row.length) {
+    keyboard.push(row);
+  }
+  const nav = [];
+  if (p > 0) {
+    nav.push({ text: 'Prev', callback_data: 'rule:list:' + (p - 1) });
+  }
+  if (p < totalPages - 1) {
+    nav.push({ text: 'Next', callback_data: 'rule:list:' + (p + 1) });
+  }
+  if (nav.length) {
+    keyboard.push(nav);
+  }
+  return { text: lines.join('\n'), keyboard: keyboard.length ? { inline_keyboard: keyboard } : null, totalPages: totalPages, page: p };
+}
+
+/**
+ * Show one /list page (new message, or edit in place when messageId given) — Never throws.
+ */
+function showListPage_(token, chatId, page, messageId) {
+  const rules = loadAllRules_();
+  const built = buildListPage_(rules, page);
+  if (messageId) {
+    editTelegramMessageText_(token, chatId, messageId, built.text, built.keyboard);
+  } else {
+    sendTelegramToChat_(token, chatId, built.text, built.keyboard);
+  }
+}
+
+/**
+ * Build rule detail text + keyboard — pure, Never throws.
+ */
+function buildRuleDetail_(rule) {
+  const text = 'Rule:\nSender: ' + rule.sender + '\nKeywords: ' + rule.keywordsRaw + '\nStatus: ' + (rule.enabled ? 'Enabled' : 'Disabled') + '\nUpdated: ' + (rule.updatedAt || '-');
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: rule.enabled ? 'Disable' : 'Enable', callback_data: 'rule:toggle:' + rule.id }],
+      [
+        { text: 'Edit keywords', callback_data: 'rule:ekey:' + rule.id },
+        { text: 'Edit sender', callback_data: 'rule:esender:' + rule.id }
+      ],
+      [
+        { text: 'Delete', callback_data: 'rule:del:' + rule.id },
+        { text: 'Back to list', callback_data: 'rule:back:0' }
+      ]
+    ]
+  };
+  return { text: text, keyboard: keyboard };
+}
+
+/**
+ * Send one rule detail as a new message — Never throws.
+ */
+function sendRuleDetail_(token, chatId, id) {
+  const rule = findRuleById_(id);
+  if (!rule) {
+    sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+    return;
+  }
+  const built = buildRuleDetail_(rule);
+  sendTelegramToChat_(token, chatId, built.text, built.keyboard);
+}
+
+/**
+ * Keywords prompt (2/3) with [Use last keywords] when a prior rule exists — Never throws.
+ */
+function showAddKeywordsPrompt_(token, chatId, sender) {
+  const last = getLastRule_();
+  const text = 'Add rule (2/3) for ' + sender + ': send keywords, comma-separated (OR). Example: air, 5折, "exact phrase". Send /cancel to abort.';
+  const keyboard = last
+    ? { inline_keyboard: [[{ text: 'Use last keywords', callback_data: 'add:uselast' }], [{ text: 'Cancel', callback_data: 'add:cancel' }]] }
+    : { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] };
+  sendTelegramToChat_(token, chatId, text, keyboard);
+}
+
+/**
+ * Show add confirm (3/3) for a new sender — Never throws.
+ */
+function showAddConfirm_(token, chatId, sender, keywordsRaw) {
+  const text = 'Add rule (3/3):\nSender: ' + sender + '\nKeywords: ' + keywordsRaw + '\nConfirm? Or send new keywords to edit before confirming.';
+  sendTelegramToChat_(
+    token,
+    chatId,
+    text,
+    { inline_keyboard: [[{ text: 'Confirm', callback_data: 'add:confirm' }, { text: 'Cancel', callback_data: 'add:cancel' }]] }
+  );
+}
+
+/**
+ * Show update confirm for a duplicate sender — Never throws.
+ */
+function showDupConfirm_(token, chatId, rule, keywordsRaw) {
+  const text = 'That sender is already watched:\nSender: ' + rule.sender + '\nKeywords: ' + rule.keywordsRaw + ' -> ' + keywordsRaw + '\nUpdate it? Or send different keywords, or /cancel.';
+  sendTelegramToChat_(
+    token,
+    chatId,
+    text,
+    { inline_keyboard: [[{ text: 'Confirm update', callback_data: 'add:confirm' }, { text: 'Cancel', callback_data: 'add:cancel' }]] }
+  );
+}
+
+/**
+ * Route non-command text for pending add/edit conversations — Never throws.
+ */
+function handleRuleConv_(token, chatId, text, conv) {
+  const step = conv && conv.step ? String(conv.step) : '';
+  if (step === 'await_sender') {
+    const sender = trim_(text);
+    if (!isValidSender_(sender)) {
+      sendTelegramToChat_(token, chatId, 'That sender does not look like a domain or full email. Example: xxx.com or abc@xxx.com. Try again, or /cancel.');
+      return;
+    }
+    const dup = findRuleBySender_(sender);
+    if (dup) {
+      setConv_(chatId, { step: 'await_dup_keywords', ruleId: dup.id, sender: dup.sender });
+      const last = getLastRule_();
+      const keyboard = last
+        ? { inline_keyboard: [[{ text: 'Use last keywords', callback_data: 'add:uselast' }], [{ text: 'Cancel', callback_data: 'add:cancel' }]] }
+        : { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] };
+      sendTelegramToChat_(token, chatId, 'That sender is already watched (keywords: ' + dup.keywordsRaw + '). Send new keywords to update it, or /cancel.', keyboard);
+      return;
+    }
+    setConv_(chatId, { step: 'await_keywords', sender: sender });
+    showAddKeywordsPrompt_(token, chatId, sender);
+    return;
+  }
+  if (step === 'await_keywords' || step === 'await_confirm') {
+    if (!hasKeywords_(text)) {
+      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.');
+      return;
+    }
+    const sender = trim_(conv.sender);
+    if (!isValidSender_(sender)) {
+      // Corrupt/expired conv (sender lost) — restart instead of writing a bad row.
+      clearConv_(chatId);
+      sendTelegramToChat_(token, chatId, 'Session expired. Send /add to restart.');
+      return;
+    }
+    const keywordsRaw = trim_(text);
+    setConv_(chatId, { step: 'await_confirm', sender: sender, keywordsRaw: keywordsRaw });
+    showAddConfirm_(token, chatId, sender, keywordsRaw);
+    return;
+  }
+  if (step === 'await_dup_keywords' || step === 'await_dup_confirm') {
+    if (!hasKeywords_(text)) {
+      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.');
+      return;
+    }
+    const target = findRuleById_(conv.ruleId);
+    if (!target) {
+      clearConv_(chatId);
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    const keywordsRaw = trim_(text);
+    setConv_(chatId, { step: 'await_dup_confirm', ruleId: target.id, sender: target.sender, keywordsRaw: keywordsRaw });
+    showDupConfirm_(token, chatId, target, keywordsRaw);
+    return;
+  }
+  if (step === 'await_edit_keywords') {
+    if (!hasKeywords_(text)) {
+      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.');
+      return;
+    }
+    const target = findRuleById_(conv.ruleId);
+    if (!target) {
+      clearConv_(chatId);
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    const res = updateRuleById_(target.id, { keywordsRaw: trim_(text) });
+    clearConv_(chatId);
+    if (res.ok) {
+      sendTelegramToChat_(token, chatId, 'Rule updated (' + target.sender + ').');
+    } else {
+      sendTelegramToChat_(token, chatId, 'Could not update the rule: ' + res.error + ' Send /list to retry.');
+    }
+    return;
+  }
+  if (step === 'await_edit_sender') {
+    const sender = trim_(text);
+    if (!isValidSender_(sender)) {
+      sendTelegramToChat_(token, chatId, 'That sender does not look like a domain or full email. Example: xxx.com or abc@xxx.com. Try again, or /cancel.');
+      return;
+    }
+    const target = findRuleById_(conv.ruleId);
+    if (!target) {
+      clearConv_(chatId);
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    const clash = findRuleBySender_(sender);
+    if (clash && String(clash.id) !== String(target.id)) {
+      sendTelegramToChat_(token, chatId, 'That sender is already watched by another rule. Pick a different sender, or /cancel.');
+      return;
+    }
+    const res = updateRuleById_(target.id, { sender: sender });
+    clearConv_(chatId);
+    if (res.ok) {
+      sendTelegramToChat_(token, chatId, 'Rule updated (' + sender + ').');
+    } else {
+      sendTelegramToChat_(token, chatId, 'Could not update the rule: ' + res.error + ' Send /list to retry.');
+    }
+    return;
+  }
+  // Expired or corrupt step — fail open with guidance, never silent.
+  clearConv_(chatId);
+  sendTelegramToChat_(token, chatId, 'Session expired. Send /add to restart.');
+}
+
+/**
+ * Rule/add callback sub-router (called from handleCallback_) — Never throws.
+ */
+function handleRuleCallback_(token, chatId, data, messageId, callbackId) {
+  const d = String(data || '');
+  if (d === 'add:cancel') {
+    clearConv_(chatId);
+    answerTelegramCallback_(token, callbackId, 'Cancelled');
+    if (messageId) {
+      editTelegramMessageText_(token, chatId, messageId, 'Cancelled. Nothing changed.');
+    } else {
+      sendTelegramToChat_(token, chatId, 'Cancelled. Nothing changed.');
+    }
+    return;
+  }
+  if (d === 'add:uselast') {
+    const conv = getConv_(chatId);
+    const last = getLastRule_();
+    if (!last) {
+      answerTelegramCallback_(token, callbackId, 'No prior rule');
+      sendTelegramToChat_(token, chatId, 'No prior rule yet. Send keywords, or /cancel.');
+      return;
+    }
+    if (!conv || (conv.step !== 'await_keywords' && conv.step !== 'await_dup_keywords')) {
+      answerTelegramCallback_(token, callbackId, 'Expired');
+      sendTelegramToChat_(token, chatId, 'Session expired. Send /add to restart.');
+      return;
+    }
+    answerTelegramCallback_(token, callbackId, 'Filled');
+    if (conv.step === 'await_dup_keywords') {
+      const target = findRuleById_(conv.ruleId);
+      if (!target) {
+        clearConv_(chatId);
+        sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+        return;
+      }
+      setConv_(chatId, { step: 'await_dup_confirm', ruleId: target.id, sender: target.sender, keywordsRaw: last.keywordsRaw });
+      showDupConfirm_(token, chatId, target, last.keywordsRaw);
+    } else {
+      const sender = trim_(conv.sender);
+      setConv_(chatId, { step: 'await_confirm', sender: sender, keywordsRaw: last.keywordsRaw });
+      showAddConfirm_(token, chatId, sender, last.keywordsRaw);
+    }
+    return;
+  }
+  if (d === 'add:confirm') {
+    const conv = getConv_(chatId);
+    if (!conv || (conv.step !== 'await_confirm' && conv.step !== 'await_dup_confirm')) {
+      answerTelegramCallback_(token, callbackId, 'Expired');
+      sendTelegramToChat_(token, chatId, 'Session expired. Send /add to restart.');
+      return;
+    }
+    if (conv.step === 'await_dup_confirm') {
+      const target = findRuleById_(conv.ruleId);
+      if (!target) {
+        clearConv_(chatId);
+        answerTelegramCallback_(token, callbackId, 'Not found');
+        sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+        return;
+      }
+      const res = updateRuleById_(target.id, { keywordsRaw: conv.keywordsRaw });
+      clearConv_(chatId);
+      if (res.ok) {
+        answerTelegramCallback_(token, callbackId, 'Updated');
+        sendTelegramToChat_(token, chatId, 'Rule updated (' + target.sender + ').');
+      } else {
+        answerTelegramCallback_(token, callbackId, 'Failed');
+        sendTelegramToChat_(token, chatId, 'Could not update the rule: ' + res.error + ' Send /list to retry.');
+      }
+      return;
+    }
+    // New-rule confirm: re-check the 30-enabled cap (race with other writes).
+    const rules = loadAllRules_();
+    if (isRuleLimitReached_(rules)) {
+      clearConv_(chatId);
+      answerTelegramCallback_(token, callbackId, 'Limit reached');
+      sendTelegramToChat_(token, chatId, 'Rule limit reached (30 enabled). Disable or delete a rule before adding.');
+      return;
+    }
+    // Re-check sender shape + duplicate (race/corrupt conv): never write a bad row.
+    if (!isValidSender_(trim_(conv.sender)) || !hasKeywords_(conv.keywordsRaw)) {
+      clearConv_(chatId);
+      answerTelegramCallback_(token, callbackId, 'Expired');
+      sendTelegramToChat_(token, chatId, 'Session expired. Send /add to restart.');
+      return;
+    }
+    // Re-check duplicate (race): fall into the update path when taken.
+    const dup = findRuleBySender_(conv.sender);
+    if (dup) {
+      const res = updateRuleById_(dup.id, { keywordsRaw: conv.keywordsRaw });
+      clearConv_(chatId);
+      if (res.ok) {
+        answerTelegramCallback_(token, callbackId, 'Updated');
+        sendTelegramToChat_(token, chatId, 'Rule updated (' + dup.sender + ').');
+      } else {
+        answerTelegramCallback_(token, callbackId, 'Failed');
+        sendTelegramToChat_(token, chatId, 'Could not update the rule: ' + res.error + ' Send /list to retry.');
+      }
+      return;
+    }
+    const res = appendRule_(trim_(conv.sender), trim_(conv.keywordsRaw));
+    const senderEcho = trim_(conv.sender);
+    clearConv_(chatId);
+    if (res.ok) {
+      answerTelegramCallback_(token, callbackId, 'Added');
+      sendTelegramToChat_(token, chatId, 'Rule added (' + senderEcho + '). It is enabled. Use /list to manage.');
+    } else {
+      answerTelegramCallback_(token, callbackId, 'Failed');
+      sendTelegramToChat_(token, chatId, 'Could not save the rule: ' + res.error);
+    }
+    return;
+  }
+  if (d.indexOf('rule:list:') === 0) {
+    const page = parseInt(d.substring('rule:list:'.length), 10);
+    answerTelegramCallback_(token, callbackId, 'Page');
+    showListPage_(token, chatId, page, messageId);
+    return;
+  }
+  if (d.indexOf('rule:view:') === 0) {
+    const id = trim_(d.substring('rule:view:'.length));
+    answerTelegramCallback_(token, callbackId, 'Opened');
+    sendRuleDetail_(token, chatId, id);
+    return;
+  }
+  if (d.indexOf('rule:toggle:') === 0) {
+    const id = trim_(d.substring('rule:toggle:'.length));
+    const rule = findRuleById_(id);
+    if (!rule) {
+      answerTelegramCallback_(token, callbackId, 'Not found');
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    if (!rule.enabled && isRuleLimitReached_(loadAllRules_())) {
+      answerTelegramCallback_(token, callbackId, 'Limit reached');
+      sendTelegramToChat_(token, chatId, 'Rule limit reached (30 enabled). Disable or delete a rule before enabling.');
+      return;
+    }
+    const res = updateRuleById_(rule.id, { enabled: !rule.enabled });
+    if (!res.ok) {
+      answerTelegramCallback_(token, callbackId, 'Failed');
+      sendTelegramToChat_(token, chatId, 'Could not update the rule: ' + res.error);
+      return;
+    }
+    answerTelegramCallback_(token, callbackId, rule.enabled ? 'Disabled' : 'Enabled');
+    const updated = findRuleById_(rule.id);
+    const fallback = { id: rule.id, sender: rule.sender, keywordsRaw: rule.keywordsRaw, enabled: !rule.enabled, updatedAt: rule.updatedAt };
+    const built = buildRuleDetail_(updated || fallback);
+    if (messageId) {
+      editTelegramMessageText_(token, chatId, messageId, built.text, built.keyboard);
+    } else {
+      sendTelegramToChat_(token, chatId, built.text, built.keyboard);
+    }
+    return;
+  }
+  if (d.indexOf('rule:ekey:') === 0) {
+    const id = trim_(d.substring('rule:ekey:'.length));
+    const rule = findRuleById_(id);
+    if (!rule) {
+      answerTelegramCallback_(token, callbackId, 'Not found');
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    setConv_(chatId, { step: 'await_edit_keywords', ruleId: rule.id });
+    answerTelegramCallback_(token, callbackId, 'Send keywords');
+    sendTelegramToChat_(token, chatId, 'Editing keywords for ' + rule.sender + ' (current: ' + rule.keywordsRaw + '). Send new keywords, or /cancel.', { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] });
+    return;
+  }
+  if (d.indexOf('rule:esender:') === 0) {
+    const id = trim_(d.substring('rule:esender:'.length));
+    const rule = findRuleById_(id);
+    if (!rule) {
+      answerTelegramCallback_(token, callbackId, 'Not found');
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    setConv_(chatId, { step: 'await_edit_sender', ruleId: rule.id });
+    answerTelegramCallback_(token, callbackId, 'Send sender');
+    sendTelegramToChat_(token, chatId, 'Editing sender (current: ' + rule.sender + '). Send a domain or full email, or /cancel.', { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] });
+    return;
+  }
+  if (d.indexOf('rule:delyes:') === 0) {
+    const id = trim_(d.substring('rule:delyes:'.length));
+    const res = deleteRuleById_(id);
+    if (!res.ok) {
+      answerTelegramCallback_(token, callbackId, 'Not found');
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    answerTelegramCallback_(token, callbackId, 'Deleted');
+    const text = 'Rule deleted (' + res.sender + '). Log rows are kept for history.';
+    if (messageId) {
+      editTelegramMessageText_(token, chatId, messageId, text);
+    } else {
+      sendTelegramToChat_(token, chatId, text);
+    }
+    return;
+  }
+  if (d.indexOf('rule:delno:') === 0) {
+    const id = trim_(d.substring('rule:delno:'.length));
+    const rule = findRuleById_(id);
+    answerTelegramCallback_(token, callbackId, 'Cancelled');
+    if (!rule) {
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    const built = buildRuleDetail_(rule);
+    if (messageId) {
+      editTelegramMessageText_(token, chatId, messageId, built.text, built.keyboard);
+    } else {
+      sendTelegramToChat_(token, chatId, built.text, built.keyboard);
+    }
+    return;
+  }
+  if (d.indexOf('rule:del:') === 0) {
+    const id = trim_(d.substring('rule:del:'.length));
+    const rule = findRuleById_(id);
+    if (!rule) {
+      answerTelegramCallback_(token, callbackId, 'Not found');
+      sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+      return;
+    }
+    answerTelegramCallback_(token, callbackId, 'Confirm delete');
+    const text = 'Delete rule ' + rule.sender + '? Log rows are kept. Confirm?';
+    const keyboard = { inline_keyboard: [[{ text: 'Yes, delete', callback_data: 'rule:delyes:' + rule.id }, { text: 'Cancel', callback_data: 'rule:delno:' + rule.id }]] };
+    if (messageId) {
+      editTelegramMessageText_(token, chatId, messageId, text, keyboard);
+    } else {
+      sendTelegramToChat_(token, chatId, text, keyboard);
+    }
+    return;
+  }
+  if (d.indexOf('rule:back:') === 0) {
+    const page = parseInt(d.substring('rule:back:'.length), 10);
+    answerTelegramCallback_(token, callbackId, 'Back');
+    showListPage_(token, chatId, page, null);
+    return;
+  }
+  // Silent: unknown rule/add callback — stay silent (matches existing convention).
+}
+
+/**
+ * Set the bot command menu (Telegram Menu button) so the owner never types.
+ * Commands are per-bot; call after setWebhook (Setup) and after token
+ * replace (/connect). Best-effort: callers stay silent on failure because
+ * typed commands keep working and the next Setup rerun retries.
+ * Returns { ok, error }; error never contains the token. Never throws.
+ */
+function telegramSetMyCommands_(token) {
+  const t = trim_(token);
+  if (!t) {
+    return { ok: false, error: 'Missing bot_token.' };
+  }
+  const commands = [
+    { command: 'list', description: 'Show rules' },
+    { command: 'add', description: 'Add a rule' },
+    { command: 'interval', description: 'Polling interval' },
+    { command: 'status', description: 'Watcher status' },
+    { command: 'help', description: 'Command help' },
+    { command: 'transfer', description: 'Move to this account' },
+    { command: 'connect', description: 'Replace bot token' }
+  ];
+  try {
+    const resp = UrlFetchApp.fetch(
+      telegramApiUrl_(t, 'setMyCommands'),
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({ commands: commands }),
+        muteHttpExceptions: true
+      }
+    );
+    const mapped = mapSendError_(resp.getResponseCode(), resp.getContentText());
+    if (!mapped) {
+      return { ok: true, error: '' };
+    }
+    return { ok: false, error: mapped };
+  } catch (e) {
+    let msg = e && e.message ? String(e.message) : String(e);
+    msg = redactToken_(msg, t);
+    return { ok: false, error: truncateDebug_(msg) };
+  }
+}
+
+/**
+ * Human label for a poll interval — pure, Never throws.
+ */
+function formatIntervalLabel_(minutes) {
+  const n = parseInt(String(minutes), 10);
+  if (n === 120) {
+    return '2 hours';
+  }
+  if (n === 360) {
+    return '6 hours';
+  }
+  if (n === 720) {
+    return '12 hours';
+  }
+  if (n === 30 || n === 60 || n === 15) {
+    return n + ' min';
+  }
+  return String(minutes);
+}
+
+/**
+ * Short button label for an interval option, marked when current — pure, Never throws.
+ */
+function formatIntervalButton_(minutes, current) {
+  const n = parseInt(String(minutes), 10);
+  const short = n === 120 ? '2hr' : n === 360 ? '6hr' : n === 720 ? '12hr' : n + 'min';
+  return short + (n === current ? ' (current)' : '');
+}
+
+/**
+ * Show interval options with the current one marked — Never throws.
+ */
+function handleInterval_(token, chatId) {
+  const current = getPollIntervalMinutes();
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'Polling interval (current: every ' + formatIntervalLabel_(current) + '). Pick one, or Cancel:',
+    {
+      inline_keyboard: [
+        [
+          { text: formatIntervalButton_(15, current), callback_data: 'interval:15' },
+          { text: formatIntervalButton_(30, current), callback_data: 'interval:30' }
+        ],
+        [
+          { text: formatIntervalButton_(60, current), callback_data: 'interval:60' },
+          { text: formatIntervalButton_(120, current), callback_data: 'interval:120' }
+        ],
+        [
+          { text: formatIntervalButton_(360, current), callback_data: 'interval:360' },
+          { text: formatIntervalButton_(720, current), callback_data: 'interval:720' }
+        ],
+        [{ text: 'Cancel', callback_data: 'interval:cancel' }]
+      ]
+    }
+  );
+}
+
+/**
+ * Apply an interval tap (rebuilds the trigger via setPollIntervalMinutes_) — Never throws.
+ */
+function handleIntervalCallback_(token, chatId, minutesText, messageId, callbackId) {
+  if (trim_(minutesText) === 'cancel') {
+    // No conv state for interval — Cancel just drops the buttons, never silent.
+    answerTelegramCallback_(token, callbackId, 'Cancelled');
+    if (messageId) {
+      editTelegramMessageText_(token, chatId, messageId, 'Cancelled. Nothing changed.');
+    } else {
+      sendTelegramToChat_(token, chatId, 'Cancelled. Nothing changed.');
+    }
+    return;
+  }
+  const n = parseInt(String(minutesText), 10);
+  let allowed = false;
+  for (let i = 0; i < ALLOWED_INTERVAL_MINUTES.length; i++) {
+    if (n === ALLOWED_INTERVAL_MINUTES[i]) {
+      allowed = true;
+      break;
+    }
+  }
+  if (!allowed) {
+    // Silent: unknown interval value — stay silent (matches existing convention).
+    return;
+  }
+  let applied = 0;
+  try {
+    applied = setPollIntervalMinutes(n);
+  } catch (e) {
+    answerTelegramCallback_(token, callbackId, 'Failed');
+    sendTelegramToChat_(token, chatId, 'Could not update the trigger. Rerun Deal Watch > Setup in the Sheet, or try again.');
+    return;
+  }
+  answerTelegramCallback_(token, callbackId, 'Set');
+  const text = 'Polling interval set to every ' + formatIntervalLabel_(applied) + '. The next run follows the new schedule.';
+  if (messageId) {
+    editTelegramMessageText_(token, chatId, messageId, text);
+  } else {
+    sendTelegramToChat_(token, chatId, text);
+  }
+}
+
+/**
+ * Last Runs row summary ({ start, end, found, sent }) — Never throws (null when none).
+ */
+function readLastRunsSummary_() {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RUNS);
+    if (!sheet || sheet.getLastRow() < 2) {
+      return null;
+    }
+    const lastRow = sheet.getLastRow();
+    const headers = sheet.getRange(1, 1, 1, HEADERS_RUNS.length).getValues()[0];
+    const startIdx = getColumnIndex_(headers, 'start', 0);
+    const endIdx = getColumnIndex_(headers, 'end', 1);
+    const foundIdx = getColumnIndex_(headers, 'found', 2);
+    const sentIdx = getRunsHeaderIndex_(headers).sentIdx;
+    const row = sheet.getRange(lastRow, 1, 1, HEADERS_RUNS.length).getValues()[0];
+    const stamp = row[endIdx] || row[startIdx];
+    return {
+      when: formatSheetStamp_(stamp),
+      found: String(row[foundIdx] === null || row[foundIdx] === undefined ? '' : row[foundIdx]),
+      sent: String(row[sentIdx] === null || row[sentIdx] === undefined ? '' : row[sentIdx])
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Show watcher status (interval + rules + last run + error) — Never throws.
+ */
+function handleStatus_(token, chatId) {
+  const interval = getPollIntervalMinutes();
+  const rules = loadAllRules_();
+  let enabled = 0;
+  for (let i = 0; i < rules.length; i++) {
+    if (rules[i] && rules[i].enabled) {
+      enabled++;
+    }
+  }
+  const last = readLastRunsSummary_();
+  const pending = trim_(getPendingError_());
+  const lines = [
+    'Status:',
+    'Interval: every ' + formatIntervalLabel_(interval),
+    'Rules: ' + rules.length + ' (' + enabled + ' enabled)',
+    'Last run: ' + (last && last.when ? last.when + ' (found ' + (last.found || '0') + ', sent ' + (last.sent || '0') + ')' : 'none yet'),
+    'Error: ' + (pending || 'none')
+  ];
+  sendTelegramToChat_(token, chatId, lines.join('\n'));
+}
+
+/**
+ * Show command help — Never throws.
+ */
+function handleHelp_(token, chatId) {
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'Deal Watch commands:\n' +
+    '/list - show rules (10 per page)\n' +
+    '/add - add a rule\n' +
+    '/interval - polling interval\n' +
+    '/status - watcher status\n' +
+    '/help - this help\n' +
+    '/transfer - move the watcher to this account\n' +
+    '/connect - replace the bot token\n' +
+    'One digest per run; silence means no matches.'
+  );
 }
 
 /**

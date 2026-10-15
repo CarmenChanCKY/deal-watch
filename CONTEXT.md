@@ -6,7 +6,7 @@ Watch Gmail for promotion emails from user-chosen senders (domain or full email)
 
 MVP is single-user; future non-tech users via per-copy deployment.
 
-T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c/d/e and T6–T8 planned (see Build plan).
+T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c done (rule CRUD + `/cancel` everywhere) + T5-d done (interval/status/help + `setMyCommands` menu) + T5-e done (`T5-TestingPlan.md` + `TestT5.gs`); T6–T8 planned (see Build plan).
 
 Architecture below is the intended design unless the user changes it.
 Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
@@ -36,10 +36,10 @@ Stack:
 ## Telegram UX, Setup and onboarding
 
 - UI:
-  - Reply keyboard, guided Q&A, inline per-rule buttons, power-user slash commands.
+  - Command menu (`setMyCommands`) + guided Q&A + inline per-rule buttons; slash commands are fallback.
   - The only surface touched daily.
-  - Button-first; raw commands are fallback only; free-text control rejected.
-  - Add-rule keywords step offers `[Use last keywords]` (hidden when no prior rule exists), filling keywords from the most recently created rule for confirm/edit.
+  - Button-first; raw typing is fallback only; free-text control rejected; persistent reply keyboard never built.
+  - Add-rule is sender → keywords → confirm; keywords step offers `[Use last keywords]` (hidden when no prior rule exists), filling keywords from the most recently created rule for confirm/edit.
 
 - Access:
   - Single owner, DM-only.
@@ -164,7 +164,7 @@ Stack:
 - T5 — Telegram UX + one-time Setup:
   - T5-a (done): `doPost` router + auth gate (URL `secret` check — Apps Script cannot read the `secret_token` header — DM-only, owner allowlist, silent ignore for strangers/groups).
   - T5-b (done): Sheet `Setup` (menu item only) + `/start <token>` bind + `/transfer` + `/connect` (both with inline confirm); `rule_<id>` mirror cache; English UI first.
-  - T5-c/d/e (planned): rule CRUD (`/list` 10/page → detail, duplicate sender → edit, 30-enabled block) + interval/status/help + `T5-TestingPlan.md` + `TestT5.gs`.
+  - T5-c/d/e (done): rule CRUD (`/list` 10/page, 2 buttons/row, → detail with Enable/Disable + Edit keywords/sender + Delete-confirm, duplicate sender → edit, 30-enabled block at entry; keywords validated by `parseKeywords`, empty rejected; Cancel button on every input step) + interval (inline fixed dropdown) / status (interval + rule count + last run + `last_error`) / help + command menu (`setMyCommands` in Setup/re-attach) + unknown → short help (strangers/groups stay silent) + `T5-TestingPlan.md` + `TestT5.gs`; English-first.
   - Deferred: suggestion UI + `/setkey` + `/setmodel` stay in T6; `topic_hint` unused until T6.
 
 - T6 — Suggestion (optional):
