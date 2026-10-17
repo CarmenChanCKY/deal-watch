@@ -31,6 +31,7 @@ Thinking process and decision history (problems, options, why): see [AI-ASSISTED
 - Shared Util: no copy-pasted Telegram fetch, redact, truncate, or error branches. Route through Util helpers (`telegramApiUrl_`, `redactToken_`, `truncateDebug_`, `mapSendError_`, `describeCallbackResult_`, `getRunsHeaderIndex_`).
 - Naming and docs: private helpers end with `_`, public functions do not. Config uses `UPPER_SNAKE`, the rest uses `camelCase`. Every helper has a JSDoc line stating pure, Never throws, or silent behaviour.
 - No new trace without approval: no `Logger.log`, no extra `Runs` / `Log` writes, no new `ScriptProperties` keys unless the user approves them in a separate task.
+- For all `/cancel` command, add an inline telegram bot button
 
 ### Testing
 

@@ -10,6 +10,11 @@
  * - T5-a/b: doPost router + Setup/bind/transfer/connect (see inbound section).
  * - T5-c: rule CRUD (/add flow, /list pages, detail inline buttons).
  * - T5-d: interval/status/help + setMyCommands menu.
+ * - T6-a: OpenRouter key/model storage + validation (helpers; see T6-i for entry).
+ * - T6-b: OpenRouter suggestion client (seed-only prompt, parse, cache, call).
+ * - T6-c: keyword ideas ([Need ideas?] opens Mini App Ideas; topic_hint on confirm).
+ * - T6-d: Mini App plumbing (bot-issued open token + doGet HTML route + smoke).
+ * - T6-i: single /setai opens Mini App Settings; legacy inline pickers removed.
  *
  * Conventions follow CONTEXT.md:
  * - Rules: id | sender | keywords (OR, comma) | enabled | topic_hint | updated_at
@@ -50,6 +55,49 @@ const PROP_BOT_TOKEN = 'bot_token';
 const PROP_OWNER_CHAT_ID = 'owner_chat_id';
 const PROP_LAST_ERROR = 'last_error';
 const PROP_CONSECUTIVE_FAILURES = 'consecutive_send_failures';
+
+// T6 — OpenRouter suggestion fence (optional; disabled cleanly when blank).
+// Only the seed is ever sent; never email content, matching, or rule writes.
+const PROP_OPENROUTER_KEY = 'openrouter_key';
+const PROP_LLM_MODEL = 'llm_model';
+const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
+// T6-b suggestion client: one call per request, seed-only, cached (~6h).
+const SUGGESTION_COUNT = 5;
+const SUGGEST_CACHE_TTL_SECONDS = 21600;
+// Always cap completion length — keyword lists are short and this bounds cost.
+const SUGGESTION_MAX_TOKENS = 300;
+
+// T6-d Mini App: the bot sends a one-tap web_app button whose URL carries a
+// token bound to the owner chat. Apps Script cannot read Telegram initData
+// (launch params sit in the top-level URL, not the served iframe), so this
+// token is the auth substitute: TTL counts from button mint, reusable within
+// it, and re-checked on every google.script.run call.
+const APP_TOKEN_TTL_SECONDS = 7200;
+const APP_TOKEN_CACHE_PREFIX = 'app_tok_';
+const APP_PARAM_APP = 'app';
+const APP_PARAM_TOKEN = 't';
+const APP_SMOKE = 'smoke';
+const MINI_APP_TITLE = 'Deal Watch';
+// Apps Script ignores meta tags in the HTML file, so the viewport is injected
+// via HtmlOutput.addMetaTag (the only meta tags Apps Script allows).
+const MINI_APP_VIEWPORT = 'width=device-width, initial-scale=1, viewport-fit=cover';
+// Cap the model list the Mini App renders in one search result (long-list UI
+// polish is deferred to T6-k); the search box narrows before hitting this.
+const MINI_APP_MODEL_RESULT_MAX = 30;
+// Mini App views. The ?app= query param selects which view the page renders.
+const MINI_APP_VIEW_IDEAS = 'ideas';
+const MINI_APP_VIEW_SETTINGS = 'settings';
+
+// T6-e model metadata: one slim cache key (CacheService) shared by the picker
+// and the suggestion call (reasoning-off decision). ~30KB, best-effort.
+const MODEL_META_CACHE_KEY = 'model_meta';
+const MODEL_META_CACHE_TTL_SECONDS = 21600;
+// Dynamic router pseudo-models (openrouter/auto, openrouter/free, …) pick the
+// real model at random per request — hidden because latency/quality are unknown.
+const MODEL_ROUTER_PREFIX = 'openrouter/';
+const MODEL_REASONING_MANDATORY = 'mandatory';
+const MODEL_REASONING_OPTIONAL = 'optional';
+const MODEL_REASONING_NONE = 'none';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const TELEGRAM_MAX_TEXT = 4000;
@@ -136,6 +184,22 @@ function mapSendError_(code, bodyText) {
   } catch (e) {
     return 'Telegram bad response (HTTP ' + code + ').';
   }
+}
+
+/**
+ * Extract result.message_id from a Telegram sendMessage body — pure, Never throws.
+ * Returns '' when the id is missing so callers can fall back to a fresh send.
+ */
+function extractMessageId_(bodyText) {
+  try {
+    const data = JSON.parse(bodyText);
+    if (data && data.ok === true && data.result && data.result.message_id !== undefined) {
+      return data.result.message_id;
+    }
+  } catch (e) {
+    // Best-effort parse; a missing id just means nothing to edit later.
+  }
+  return '';
 }
 
 /**
@@ -1533,7 +1597,7 @@ function buildMergedMessage_(digest, errorParts) {
 
 // ---------------------------------------------------------------------------
 // T5-a/b: Telegram inbound + one-time Setup (no rule CRUD, no interval UI;
-//         no suggest, no /setkey — those are T5-c/d and T6).
+//         no suggest, no /setai — those are T5-c/d and T6).
 //
 // Locked per CONTEXT.md + owner grill:
 // - DM-only, single owner, /start <one-time token> bind.
@@ -1754,7 +1818,8 @@ function maskSecret_(s) {
 /**
  * Send text to any chat (binding/transfer/connect flows + future T5-c/d).
  * replyMarkup is optional (reply keyboard / inline buttons).
- * Returns { ok, error }; error never contains the token.
+ * Returns { ok, error, messageId }; error never contains the token.
+ * messageId is the sent message id ('' when unavailable) so callers can edit it.
  */
 function sendTelegramToChat_(token, chatId, text, replyMarkup) {
   const t = trim_(token);
@@ -1795,7 +1860,7 @@ function sendTelegramToChat_(token, chatId, text, replyMarkup) {
     }
     const mapped = mapSendError_(code, body);
     if (!mapped) {
-      return { ok: true, error: '' };
+      return { ok: true, error: '', messageId: extractMessageId_(body) };
     }
     return { ok: false, error: mapped };
   } catch (e) {
@@ -2447,8 +2512,9 @@ function getLastRule_() {
 
 /**
  * Append one enabled rule under lock — Never throws ({ ok, id, error }).
+ * topicHint is optional ('' when omitted).
  */
-function appendRule_(sender, keywordsRaw) {
+function appendRule_(sender, keywordsRaw, topicHint) {
   try {
     return withScriptLock_(function () {
       const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RULES);
@@ -2457,8 +2523,9 @@ function appendRule_(sender, keywordsRaw) {
       }
       const id = maxRuleIdPlusOne_();
       const now = formatRunDate_(new Date());
-      sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS_RULES.length).setValues([[id, sender, keywordsRaw, true, '', now]]);
-      saveRuleCache_({ id: id, sender: sender, keywordsRaw: keywordsRaw, enabled: true, topicHint: '', updatedAt: now });
+      const hint = topicHint === undefined || topicHint === null ? '' : String(topicHint);
+      sheet.getRange(sheet.getLastRow() + 1, 1, 1, HEADERS_RULES.length).setValues([[id, sender, keywordsRaw, true, hint, now]]);
+      saveRuleCache_({ id: id, sender: sender, keywordsRaw: keywordsRaw, enabled: true, topicHint: hint, updatedAt: now });
       return { ok: true, id: id, error: '' };
     });
   } catch (e) {
@@ -2499,6 +2566,7 @@ function updateRuleById_(id, fields) {
       let sender = String(cur[senderIdx]);
       let keywordsRaw = String(cur[kwIdx]);
       let enabled = isRuleEnabled_(cur[enIdx]);
+      let topicHint = topicIdx < 0 ? '' : String(cur[topicIdx] === null || cur[topicIdx] === undefined ? '' : cur[topicIdx]);
       const f = fields || {};
       if (f.sender !== undefined) {
         sender = String(f.sender);
@@ -2512,8 +2580,13 @@ function updateRuleById_(id, fields) {
         enabled = !!f.enabled;
         sheet.getRange(targetRow, enIdx + 1).setValue(enabled);
       }
+      if (f.topicHint !== undefined) {
+        topicHint = String(f.topicHint);
+        if (topicIdx >= 0) {
+          sheet.getRange(targetRow, topicIdx + 1).setValue(topicHint);
+        }
+      }
       sheet.getRange(targetRow, updIdx + 1).setValue(now);
-      const topicHint = topicIdx < 0 ? '' : String(cur[topicIdx]);
       saveRuleCache_({ id: String(id), sender: sender, keywordsRaw: keywordsRaw, enabled: enabled, topicHint: topicHint, updatedAt: now });
       return { ok: true, error: '' };
     });
@@ -2562,6 +2635,7 @@ function onOpen() {
     SpreadsheetApp.getUi()
       .createMenu('Deal Watch')
       .addItem('Setup', 'runSheetSetup')
+      .addItem('Send Mini App test', 'sendMiniAppTest')
       .addToUi();
   } catch (e) {
     // Menu creation is best-effort (e.g. headless executions).
@@ -2725,11 +2799,24 @@ function runSheetSetup() {
 // ---------------------------------------------------------------------------
 
 /**
- * Browser health check (browsers GET; Telegram POSTs to doPost).
- * No params, no secrets, no logic — proves the deployment is live.
+ * Browser GET entry. Routes two cases:
+ * - ?app=<name>&t=<token> → the Mini App page for a valid owner token.
+ * - anything else → the liveness text (browsers GET; Telegram POSTs to doPost).
+ * No params, no secrets, no logic beyond token validation — proves the
+ * deployment is live.
  */
-function doGet() {
+function doGet(e) {
   try {
+    const app = trim_(e && e.parameter ? e.parameter[APP_PARAM_APP] : '');
+    if (app) {
+      const token = trim_(e && e.parameter ? e.parameter[APP_PARAM_TOKEN] : '');
+      const rec = readAppToken_(token);
+      const owner = getOwnerChatId_();
+      if (!rec || (rec.app && app !== rec.app) || (owner && !isAppTokenForChat_(rec, owner))) {
+        return serveMiniAppError_();
+      }
+      return serveMiniApp_(app, token);
+    }
     // HtmlService avoids the ContentService 302 path that Telegram treats
     // as a failed webhook delivery (pending_update_count retries).
     return HtmlService.createHtmlOutput('Deal Watch webhook alive. Open your bot in Telegram.');
@@ -2784,9 +2871,8 @@ function isStranger_(chatId, owner) {
  * Telegram webhook entry. Verifies the URL secret (?secret=...), drops
  * redelivered update_ids silently (at-least-once dedup), enforces
  * DM-only + owner allowlist (silent ignore otherwise), then routes:
- * /start, /transfer, /connect, /add, /list (+ callbacks). Interval/status
- * (T5-d) still reply that they arrive next to avoid silent dead ends
- * during the sliced rollout.
+ * /start, /transfer, /connect, /add, /list, /interval, /status, /help,
+ * /setai (+ callbacks).
  */
 function doPost(e) {
   try {
@@ -2887,7 +2973,7 @@ function doPost(e) {
       return telegramOk_();
     }
     // Add/edit continuation (non-command text only; slash commands route below).
-    if (conv && conv.step && conv.step !== 'await_new_token' && !/^\/\w/.test(text)) {
+    if (conv && conv.step && !/^\/\w/.test(text)) {
       handleRuleConv_(token, chatId, text, conv);
       return telegramOk_();
     }
@@ -2908,17 +2994,13 @@ function doPost(e) {
       handleStatus_(token, chatId);
     } else if (/^\/help(\s|$)/.test(text)) {
       handleHelp_(token, chatId);
-    } else if (/^\/(suggest|setkey|setmodel)(\s|$)/.test(text)) {
-      sendTelegramToChat_(
-        token,
-        chatId,
-        'Not yet in this slice: suggestions/keys (T6) arrive next. Available now: /list, /add, /interval, /status, /help, /transfer, /connect.'
-      );
+    } else if (/^\/setai(\s|$)/.test(text)) {
+      handleSetAi_(token, chatId);
     } else {
       sendTelegramToChat_(
         token,
         chatId,
-        'Unknown command. Available: /list, /add, /interval, /status, /help, /transfer, /connect.'
+        'Unknown command. Available: /list, /add, /interval, /status, /help, /setai, /transfer, /connect.'
       );
     }
     return telegramOk_();
@@ -3015,6 +3097,21 @@ function handleConnectRequest_(token, chatId) {
 }
 
 /**
+ * Generic Cancel button — every prompt that mentions /cancel carries this.
+ * Pure, Never throws.
+ */
+function cancelButton_() {
+  return { text: 'Cancel', callback_data: 'cancel:all' };
+}
+
+/**
+ * Single-row keyboard holding just the Cancel button — pure, Never throws.
+ */
+function cancelKeyboard_() {
+  return { inline_keyboard: [[cancelButton_()]] };
+}
+
+/**
  * Callback router — silent, Never throws.
  */
 function handleCallback_(cb) {
@@ -3069,6 +3166,15 @@ function handleCallback_(cb) {
     } else if (data === 'queue:no') {
       answerTelegramCallback_(token, qid, 'Cancelled');
       editTelegramMessageText_(token, chatId, messageId, 'Nothing changed. I will remind you again in 12 hours if the queue is still jammed.');
+    } else if (data === 'cancel:all') {
+      clearConv_(chatId);
+      answerTelegramCallback_(token, qid, 'Cancelled');
+      const text = 'Cancelled. Nothing changed.';
+      if (messageId) {
+        editTelegramMessageText_(token, chatId, messageId, text);
+      } else {
+        sendTelegramToChat_(token, chatId, text);
+      }
     } else if (data === 'add:confirm' || data === 'add:cancel' || data === 'add:uselast' || (data && data.indexOf('rule:') === 0)) {
       handleRuleCallback_(token, chatId, data, messageId, qid);
     } else if (data && data.indexOf('interval:') === 0) {
@@ -3131,6 +3237,1047 @@ function handleConnectToken_(token, chatId, text, incomingMessageId) {
   // Command menu follows the new token (best-effort, same as Setup).
   telegramSetMyCommands_(fresh);
   sendTelegramToChat_(token, chatId, 'Token replaced (' + maskSecret_(fresh) + '). Webhook re-attached. The old token stops working.');
+}
+
+// ---------------------------------------------------------------------------
+// T6-d: Mini App plumbing (bot-issued token, doGet route, smoke page)
+// ---------------------------------------------------------------------------
+
+/**
+ * Cache key for one Mini App open token — pure, Never throws.
+ */
+function appTokenCacheKey_(token) {
+  return APP_TOKEN_CACHE_PREFIX + String(token || '');
+}
+
+/**
+ * Mint a Mini App open token bound to a chat, stored in CacheService with the
+ * app TTL. payload is merged into the record for purpose-specific context.
+ * Returns { ok, token, error }. Never throws.
+ */
+function mintAppToken_(chatId, app, payload) {
+  const c = trim_(chatId);
+  if (!c) {
+    return { ok: false, token: '', error: 'Missing chat id.' };
+  }
+  const token = Utilities.getUuid().replace(/-/g, '');
+  const record = {
+    chatId: c,
+    app: String(app || ''),
+    exp: new Date().getTime() + APP_TOKEN_TTL_SECONDS * MS_PER_SECOND
+  };
+  if (payload) {
+    record.payload = payload;
+  }
+  try {
+    CacheService.getScriptCache().put(
+      appTokenCacheKey_(token),
+      JSON.stringify(record),
+      APP_TOKEN_TTL_SECONDS
+    );
+  } catch (e) {
+    // CacheService is best-effort; a failed put means no valid link, not a crash.
+    return { ok: false, token: '', error: 'Could not store the token.' };
+  }
+  return { ok: true, token: token, error: '' };
+}
+
+/**
+ * Read a Mini App token record, or null when missing/tampered/expired
+ * (cache may evict early, so expiry is re-checked). Never throws.
+ */
+function readAppToken_(token) {
+  const t = trim_(token);
+  if (!t) {
+    return null;
+  }
+  let raw = null;
+  try {
+    raw = CacheService.getScriptCache().get(appTokenCacheKey_(t));
+  } catch (e) {
+    return null;
+  }
+  if (!raw) {
+    return null;
+  }
+  let rec = null;
+  try {
+    rec = JSON.parse(raw);
+  } catch (e2) {
+    return null;
+  }
+  if (!rec || !rec.chatId) {
+    return null;
+  }
+  if (rec.exp && new Date().getTime() > rec.exp) {
+    return null;
+  }
+  return rec;
+}
+
+/**
+ * True when the token record belongs to the given chat — pure, Never throws.
+ */
+function isAppTokenForChat_(rec, chatId) {
+  return !!rec && String(rec.chatId) === String(trim_(chatId));
+}
+
+/**
+ * Build the Mini App open URL (?app=<name>&t=<token>) from the stored /exec
+ * URL. Returns '' when webapp_url is missing. Never throws.
+ */
+function buildMiniAppUrl_(app, token) {
+  let base = '';
+  try {
+    base = trim_(PropertiesService.getScriptProperties().getProperty(PROP_WEB_APP_URL));
+  } catch (e) {
+    base = '';
+  }
+  if (!base) {
+    return '';
+  }
+  const sep = base.indexOf('?') >= 0 ? '&' : '?';
+  return base + sep + APP_PARAM_APP + '=' + encodeURIComponent(String(app || '')) +
+    '&' + APP_PARAM_TOKEN + '=' + encodeURIComponent(String(token || ''));
+}
+
+/**
+ * Serve the Mini App HTML, injecting the view + token as template vars (the
+ * page cannot read its own query string inside the Apps Script iframe).
+ * Never throws.
+ */
+function serveMiniApp_(app, token) {
+  const tmpl = HtmlService.createTemplateFromFile('MiniApp');
+  tmpl.appName = MINI_APP_TITLE;
+  tmpl.view = String(app || '');
+  tmpl.appToken = String(token || '');
+  // Apps Script ignores meta tags written in the HTML file; only addMetaTag
+  // reaches the served page, so the mobile viewport must be set here.
+  // ALLOWALL drops the default X-Frame-Options so desktop/web Telegram clients
+  // (which load the Mini App inside a frame) can display it instead of the
+  // browser's xframe-neterror-page; the minted token + owner check is the guard.
+  return tmpl.evaluate().setTitle(MINI_APP_TITLE).addMetaTag('viewport', MINI_APP_VIEWPORT)
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * Minimal HTML error page for a missing/expired/tampered app token — Never throws.
+ */
+function serveMiniAppError_() {
+  return HtmlService.createHtmlOutput(
+    '<!doctype html><meta charset="utf-8">' +
+    '<body style="font-family:sans-serif;padding:24px">' +
+    '<h3>Link expired</h3><p>Open the app again from Telegram.</p></body>'
+  ).addMetaTag('viewport', MINI_APP_VIEWPORT)
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * Mini App entry point (T6-d smoke): echoes a validated token's app so the
+ * owner can confirm the page → backend channel works. Returns
+ * { ok, app, serverTime } or { ok:false, error }. Never throws.
+ */
+function appEcho(appToken) {
+  const rec = readAppToken_(appToken);
+  const owner = getOwnerChatId_();
+  if (!rec || (owner && !isAppTokenForChat_(rec, owner))) {
+    return { ok: false, error: 'Invalid or expired session.' };
+  }
+  return { ok: true, app: String(rec.app || ''), serverTime: new Date().toISOString() };
+}
+
+/**
+ * Sheet menu (temporary, T6-d): mint an open token and send the owner a
+ * web_app button that opens the Mini App smoke page. Never throws.
+ */
+function sendMiniAppTest() {
+  const ui = SpreadsheetApp.getUi();
+  const token = getStoredBotToken_();
+  const owner = getOwnerChatId_();
+  if (!token || !owner) {
+    ui.alert('Not set up yet. Run Deal Watch > Setup first.');
+    return;
+  }
+  const minted = mintAppToken_(owner, APP_SMOKE, null);
+  if (!minted.ok) {
+    ui.alert('Could not mint the token: ' + minted.error);
+    return;
+  }
+  const url = buildMiniAppUrl_(APP_SMOKE, minted.token);
+  if (!url) {
+    ui.alert('Missing webapp_url. Rerun Setup and paste the /exec URL.');
+    return;
+  }
+  const sent = sendTelegramToChat_(
+    token,
+    owner,
+    'Mini App smoke test — tap to open.',
+    { inline_keyboard: [[{ text: 'Open Mini App', web_app: { url: url } }]] }
+  );
+  ui.alert(sent.ok ? 'Sent. Open Telegram and tap the button.' : 'Send failed: ' + sent.error);
+}
+
+/**
+ * Mint a token for a Mini App view and send them a web_app button to open it.
+ * Returns { ok, error }; error never contains the token. Never throws.
+ */
+function sendMiniAppOpen_(token, chatId, view, text, label) {
+  const minted = mintAppToken_(chatId, view, null);
+  if (!minted.ok) {
+    return { ok: false, error: minted.error };
+  }
+  const url = buildMiniAppUrl_(view, minted.token);
+  if (!url) {
+    return { ok: false, error: 'Missing webapp_url. Rerun Setup and paste the /exec URL.' };
+  }
+  const sent = sendTelegramToChat_(
+    token,
+    chatId,
+    text,
+    { inline_keyboard: [[{ text: String(label || 'Open'), web_app: { url: url } }]] }
+  );
+  return sent && sent.ok ? { ok: true, error: '' } : { ok: false, error: (sent && sent.error) || 'Send failed.' };
+}
+
+/**
+ * /setai — open the Mini App Settings (OpenRouter key + model). Never throws.
+ */
+function handleSetAi_(token, chatId) {
+  const res = sendMiniAppOpen_(
+    token,
+    chatId,
+    MINI_APP_VIEW_SETTINGS,
+    'Manage your OpenRouter key and model in Settings. Suggestions: ' + (isSuggestionEnabled_() ? 'on' : 'off') + '.',
+    'Open settings'
+  );
+  if (!res.ok) {
+    sendTelegramToChat_(token, chatId, 'Could not open settings: ' + res.error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T6-f/T6-g: Mini App Settings — key + model (token-guarded entries)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a Mini App open token against the owner. Returns the owner chat id
+ * (or the record's chat id when no owner is set yet), or '' when invalid.
+ * Never throws.
+ */
+function miniAppOwner_(appToken) {
+  const rec = readAppToken_(appToken);
+  if (!rec) {
+    return '';
+  }
+  const owner = getOwnerChatId_();
+  if (owner && !isAppTokenForChat_(rec, owner)) {
+    return '';
+  }
+  return owner || String(rec.chatId || '');
+}
+
+/**
+ * Current Settings state for the Mini App: model, whether a key is stored, the
+ * masked key, and whether suggestions are on. The secret is never exposed raw.
+ * Never throws.
+ */
+function miniAppState_() {
+  const key = getOpenRouterKey_();
+  return {
+    model: getLlmModel_(),
+    hasKey: !!key,
+    keyMasked: key ? maskSecret_(key) : '',
+    suggestions: isSuggestionEnabled_()
+  };
+}
+
+/**
+ * Mini App entry: current Settings state. Returns { ok, state, error }.
+ * Never throws.
+ */
+function miniAppGetState(appToken) {
+  if (!miniAppOwner_(appToken)) {
+    return { ok: false, state: miniAppState_(), error: 'Invalid or expired session.' };
+  }
+  return { ok: true, state: miniAppState_(), error: '' };
+}
+
+/**
+ * Mini App entry: search the cached model list. query narrows by id/name
+ * ('' = whole list), freeOnly keeps free models only. Results are capped.
+ * Returns { ok, items, state, error }. Never throws.
+ */
+function miniAppGetModels(appToken, query, freeOnly) {
+  if (!miniAppOwner_(appToken)) {
+    return { ok: false, items: [], state: miniAppState_(), error: 'Invalid or expired session.' };
+  }
+  const meta = getModelMetaCached_();
+  if (!meta.ok) {
+    return { ok: false, items: [], state: miniAppState_(), error: meta.error };
+  }
+  let items = searchModelMeta_(meta.items, query);
+  if (freeOnly === true) {
+    const free = [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].free) {
+        free.push(items[i]);
+      }
+    }
+    items = free;
+  }
+  if (items.length > MINI_APP_MODEL_RESULT_MAX) {
+    items = items.slice(0, MINI_APP_MODEL_RESULT_MAX);
+  }
+  return { ok: true, items: items, state: miniAppState_(), error: '' };
+}
+
+/**
+ * Mini App entry: store a model id (validated against the cached list when the
+ * list is available). Returns { ok, state, error }. Never throws.
+ */
+function miniAppSetModel(appToken, modelId) {
+  if (!miniAppOwner_(appToken)) {
+    return { ok: false, state: miniAppState_(), error: 'Invalid or expired session.' };
+  }
+  const id = trim_(modelId);
+  if (!id) {
+    return { ok: false, state: miniAppState_(), error: 'Pick a model first.' };
+  }
+  const meta = getModelMetaCached_();
+  if (meta.ok) {
+    let found = false;
+    for (let i = 0; i < meta.items.length; i++) {
+      if (meta.items[i].id === id) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return { ok: false, state: miniAppState_(), error: 'That model is not in the current list. Search again.' };
+    }
+  }
+  try {
+    PropertiesService.getScriptProperties().setProperty(PROP_LLM_MODEL, id);
+  } catch (e) {
+    return { ok: false, state: miniAppState_(), error: 'Could not store the model. Nothing changed.' };
+  }
+  return { ok: true, state: miniAppState_(), error: '' };
+}
+
+/**
+ * Mini App entry: clear the stored model (suggestions turn off). Returns
+ * { ok, state, error }. Never throws.
+ */
+function miniAppClearModel(appToken) {
+  if (!miniAppOwner_(appToken)) {
+    return { ok: false, state: miniAppState_(), error: 'Invalid or expired session.' };
+  }
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(PROP_LLM_MODEL);
+  } catch (e) {
+    return { ok: false, state: miniAppState_(), error: 'Could not clear the model. Nothing changed.' };
+  }
+  return { ok: true, state: miniAppState_(), error: '' };
+}
+
+/**
+ * Mini App entry: validate an OpenRouter key (GET /key) then store it. The key
+ * is masked in replies and never echoed raw. Returns { ok, state, error }.
+ * Never throws.
+ */
+function miniAppSetKey(appToken, key) {
+  if (!miniAppOwner_(appToken)) {
+    return { ok: false, state: miniAppState_(), error: 'Invalid or expired session.' };
+  }
+  const raw = trim_(key);
+  if (!raw || /\s/.test(raw)) {
+    return { ok: false, state: miniAppState_(), error: 'That does not look like an API key.' };
+  }
+  const check = openRouterValidateKey_(raw);
+  if (!check.ok) {
+    return { ok: false, state: miniAppState_(), error: 'Key rejected (' + maskSecret_(raw) + '): ' + check.error };
+  }
+  try {
+    PropertiesService.getScriptProperties().setProperty(PROP_OPENROUTER_KEY, raw);
+  } catch (e) {
+    return { ok: false, state: miniAppState_(), error: 'Could not store the key. Nothing changed.' };
+  }
+  return { ok: true, state: miniAppState_(), error: '' };
+}
+
+/**
+ * Mini App entry: delete the stored OpenRouter key (suggestions turn off).
+ * Returns { ok, state, error }. Never throws.
+ */
+function miniAppDeleteKey(appToken) {
+  if (!miniAppOwner_(appToken)) {
+    return { ok: false, state: miniAppState_(), error: 'Invalid or expired session.' };
+  }
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(PROP_OPENROUTER_KEY);
+  } catch (e) {
+    return { ok: false, state: miniAppState_(), error: 'Could not remove the key. Nothing changed.' };
+  }
+  return { ok: true, state: miniAppState_(), error: '' };
+}
+
+// ---------------------------------------------------------------------------
+// T6-h: Mini App Ideas view (seed -> suggestions -> hand back to chat confirm)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mini App entry: keyword suggestions for a seed. exclude (array of already
+ * shown keywords) switches to the "more ideas" prompt and skips the seed cache.
+ * Returns { ok, items, state, error }. Never throws.
+ */
+function miniAppSuggest(appToken, seed, exclude) {
+  if (!miniAppOwner_(appToken)) {
+    return { ok: false, items: [], state: miniAppState_(), error: 'Invalid or expired session.' };
+  }
+  const s = trim_(seed);
+  if (!s) {
+    return { ok: false, items: [], state: miniAppState_(), error: 'Type a topic first.' };
+  }
+  if (!isSuggestionEnabled_()) {
+    return { ok: false, items: [], state: miniAppState_(), error: 'Suggestions are off. Set an OpenRouter key and model.' };
+  }
+  const ex = (exclude && exclude.length) ? exclude : null;
+  if (!ex) {
+    const cached = getCachedSuggestions_(s);
+    if (cached) {
+      return { ok: true, items: cached, state: miniAppState_(), error: '' };
+    }
+  }
+  const res = callOpenRouter_(
+    getOpenRouterKey_(),
+    getLlmModel_(),
+    s,
+    ex ? buildMoreIdeasPrompt_(s, ex) : null
+  );
+  if (!res.ok) {
+    return { ok: false, items: [], state: miniAppState_(), error: res.error };
+  }
+  if (!ex) {
+    putCachedSuggestions_(s, res.items);
+  }
+  return { ok: true, items: res.items, state: miniAppState_(), error: '' };
+}
+
+/**
+ * Mini App entry: hand the picked keywords back to the live chat conversation
+ * and show the matching confirm prompt there. Rule creation still requires the
+ * user's Confirm tap in chat. Returns { ok, error }. Never throws.
+ */
+function miniAppIdeasAdd(appToken, seed, keywords) {
+  const owner = miniAppOwner_(appToken);
+  if (!owner) {
+    return { ok: false, error: 'Invalid or expired session.' };
+  }
+  const botToken = getStoredBotToken_();
+  if (!botToken) {
+    return { ok: false, error: 'Bot is not set up.' };
+  }
+  const picked = [];
+  if (keywords && keywords.length) {
+    for (let i = 0; i < keywords.length; i++) {
+      const k = trim_(keywords[i]);
+      if (k) {
+        picked.push(k);
+      }
+    }
+  }
+  if (!picked.length) {
+    return { ok: false, error: 'Select at least one keyword.' };
+  }
+  const conv = getConv_(owner);
+  const step = conv && conv.step ? String(conv.step) : '';
+  if (step !== 'await_keywords' && step !== 'await_dup_keywords' && step !== 'await_edit_keywords') {
+    return { ok: false, error: 'Session expired. Send /add in the chat to restart.' };
+  }
+  const keywordsRaw = picked.join(', ');
+  const usedSeed = trim_(seed);
+  const mode = modeOfKeywordsStep_(step);
+  if (mode === 'add') {
+    const sender = trim_(conv.sender);
+    setConv_(owner, { step: 'await_confirm', sender: sender, keywordsRaw: keywordsRaw, seed: usedSeed, usedSuggestion: true });
+    showAddConfirm_(botToken, owner, sender, keywordsRaw);
+    return { ok: true, error: '' };
+  }
+  if (mode === 'dup') {
+    const target = findRuleById_(conv.ruleId);
+    if (!target) {
+      return { ok: false, error: 'Rule not found. Send /list in the chat to refresh.' };
+    }
+    setConv_(owner, { step: 'await_dup_confirm', ruleId: target.id, sender: target.sender, keywordsRaw: keywordsRaw, seed: usedSeed, usedSuggestion: true });
+    showDupConfirm_(botToken, owner, target, keywordsRaw);
+    return { ok: true, error: '' };
+  }
+  if (mode === 'edit') {
+    const target = findRuleById_(conv.ruleId);
+    if (!target) {
+      return { ok: false, error: 'Rule not found. Send /list in the chat to refresh.' };
+    }
+    setConv_(owner, { step: 'await_edit_confirm', ruleId: target.id, keywordsRaw: keywordsRaw, seed: usedSeed, usedSuggestion: true });
+    showEditConfirm_(botToken, owner, target, keywordsRaw);
+    return { ok: true, error: '' };
+  }
+  return { ok: false, error: 'Session expired. Send /add in the chat to restart.' };
+}
+
+// ---------------------------------------------------------------------------
+// T6-a: OpenRouter key/model storage + validation — secrets never echoed
+// ---------------------------------------------------------------------------
+
+/**
+ * Stored OpenRouter API key or '' — Never throws.
+ */
+function getOpenRouterKey_() {
+  try {
+    return trim_(PropertiesService.getScriptProperties().getProperty(PROP_OPENROUTER_KEY));
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Stored OpenRouter model id or '' — Never throws.
+ */
+function getLlmModel_() {
+  try {
+    return trim_(PropertiesService.getScriptProperties().getProperty(PROP_LLM_MODEL));
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Model id for user-facing display ('none' when unset) — Never throws.
+ */
+function currentModelLabel_() {
+  return getLlmModel_() || 'none';
+}
+
+/**
+ * Validate an OpenRouter key via GET /key (Bearer auth). Never logs or echoes
+ * the key; errors are redacted. Returns { ok, error }. Never throws.
+ */
+function openRouterValidateKey_(key) {
+  const k = trim_(key);
+  if (!k) {
+    return { ok: false, error: 'Empty key.' };
+  }
+  try {
+    const resp = UrlFetchApp.fetch(
+      OPENROUTER_API_BASE + '/key',
+      {
+        method: 'get',
+        headers: { Authorization: 'Bearer ' + k },
+        muteHttpExceptions: true
+      }
+    );
+    const code = resp.getResponseCode();
+    if (code === 401 || code === 403) {
+      return { ok: false, error: 'rejected (HTTP ' + code + ')' };
+    }
+    if (code < HTTP_OK_MIN || code >= HTTP_OK_MAX) {
+      return { ok: false, error: 'HTTP ' + code };
+    }
+    return { ok: true, error: '' };
+  } catch (e) {
+    let msg = e && e.message ? String(e.message) : String(e);
+    msg = redactToken_(msg, k);
+    return { ok: false, error: truncateDebug_(msg) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T6-e: model metadata cache + ordering (picker + reasoning-off decision)
+// ---------------------------------------------------------------------------
+
+/**
+ * True for dynamic router pseudo-models (openrouter/auto, openrouter/free, …)
+ * whose actual model is unknown per request — pure, Never throws.
+ */
+function isRouterModelId_(id) {
+  return String(id || '').indexOf(MODEL_ROUTER_PREFIX) === 0;
+}
+
+/**
+ * Classify a model's reasoning behaviour from its /models entry: 'mandatory'
+ * (always thinks), 'optional' (can be turned off), or 'none'. Pure, Never throws.
+ */
+function modelReasoningKind_(model) {
+  const r = model && model.reasoning;
+  if (!r) {
+    return MODEL_REASONING_NONE;
+  }
+  return r.mandatory === true ? MODEL_REASONING_MANDATORY : MODEL_REASONING_OPTIONAL;
+}
+
+/**
+ * True when both prompt and completion prices are "0" — pure, Never throws.
+ */
+function isFreeModelPricing_(pricing) {
+  const p = pricing || {};
+  return String(p.prompt) === '0' && String(p.completion) === '0';
+}
+
+/**
+ * True when the model outputs text (excludes image/audio-only models) — pure,
+ * Never throws.
+ */
+function hasTextOutput_(architecture) {
+  const outs = architecture && architecture.output_modalities;
+  return !!(outs && outs.indexOf && outs.indexOf('text') >= 0);
+}
+
+/**
+ * Slim the public /models entries into the pickable set: drop dynamic routers
+ * and non-text models; keep id/name/free/reasoning. Pure, Never throws.
+ */
+function buildSlimModelMeta_(rawModels) {
+  const out = [];
+  if (!rawModels || !rawModels.length) {
+    return out;
+  }
+  for (let i = 0; i < rawModels.length; i++) {
+    const m = rawModels[i] || {};
+    const id = m.id ? String(m.id) : '';
+    if (!id || isRouterModelId_(id) || !hasTextOutput_(m.architecture)) {
+      continue;
+    }
+    out.push({
+      id: id,
+      name: m.name ? String(m.name) : '',
+      free: isFreeModelPricing_(m.pricing),
+      reasoning: modelReasoningKind_(m)
+    });
+  }
+  return out;
+}
+
+/**
+ * Sort for display: non-mandatory reasoning first (faster), mandatory last;
+ * within a tier free first, then name (fallback id). Returns a new array.
+ * Pure, Never throws.
+ */
+function sortModelMeta_(entries) {
+  const list = (entries || []).slice();
+  list.sort(function (a, b) {
+    const am = a.reasoning === MODEL_REASONING_MANDATORY ? 1 : 0;
+    const bm = b.reasoning === MODEL_REASONING_MANDATORY ? 1 : 0;
+    if (am !== bm) {
+      return am - bm;
+    }
+    const af = a.free ? 0 : 1;
+    const bf = b.free ? 0 : 1;
+    if (af !== bf) {
+      return af - bf;
+    }
+    const an = String(a.name || a.id || '').toLowerCase();
+    const bn = String(b.name || b.id || '').toLowerCase();
+    if (an < bn) {
+      return -1;
+    }
+    if (an > bn) {
+      return 1;
+    }
+    return 0;
+  });
+  return list;
+}
+
+/**
+ * Filter + sort for a search box: case-insensitive substring on id or name.
+ * Empty query returns the whole sorted list. Pure, Never throws.
+ */
+function searchModelMeta_(entries, query) {
+  const q = trim_(query).toLowerCase();
+  const list = entries || [];
+  if (!q) {
+    return sortModelMeta_(list);
+  }
+  const hits = [];
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i] || {};
+    const id = String(e.id || '').toLowerCase();
+    const name = String(e.name || '').toLowerCase();
+    if (id.indexOf(q) >= 0 || name.indexOf(q) >= 0) {
+      hits.push(e);
+    }
+  }
+  return sortModelMeta_(hits);
+}
+
+/**
+ * Fetch the public OpenRouter model list and slim it. Returns the pickable
+ * entries, or null when the list cannot be read. Public endpoint (no key, no
+ * cost). Never throws.
+ */
+function fetchModelMeta_() {
+  try {
+    const resp = UrlFetchApp.fetch(
+      OPENROUTER_API_BASE + '/models',
+      { method: 'get', muteHttpExceptions: true }
+    );
+    const code = resp.getResponseCode();
+    if (code < HTTP_OK_MIN || code >= HTTP_OK_MAX) {
+      return null;
+    }
+    const data = JSON.parse(resp.getContentText());
+    if (!data || !data.data || !data.data.length) {
+      return null;
+    }
+    const items = buildSlimModelMeta_(data.data);
+    return items.length ? items : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Cached pickable model list (CacheService, 6h; best-effort — refetches on
+ * miss or early eviction). Returns { ok, items, error }. Never throws.
+ */
+function getModelMetaCached_() {
+  let raw = null;
+  try {
+    raw = CacheService.getScriptCache().get(MODEL_META_CACHE_KEY);
+  } catch (e) {
+    raw = null;
+  }
+  if (raw) {
+    try {
+      const cached = JSON.parse(raw);
+      if (cached && cached.length) {
+        return { ok: true, items: cached, error: '' };
+      }
+    } catch (e2) {
+      // Corrupt cache entry: fall through and refetch.
+    }
+  }
+  const fresh = fetchModelMeta_();
+  if (!fresh) {
+    return { ok: false, items: [], error: 'Could not read the OpenRouter model list. Try again later.' };
+  }
+  try {
+    CacheService.getScriptCache().put(
+      MODEL_META_CACHE_KEY,
+      JSON.stringify(fresh),
+      MODEL_META_CACHE_TTL_SECONDS
+    );
+  } catch (e3) {
+    // Cache put is best-effort; return the fresh list anyway.
+  }
+  return { ok: true, items: fresh, error: '' };
+}
+
+/**
+ * Reasoning kind for one model id from the cached metadata, or '' when the id
+ * is unknown. Used to decide whether reasoning can be turned off at call time.
+ * Never throws.
+ */
+function getModelReasoningKind_(id) {
+  const want = trim_(id);
+  if (!want) {
+    return '';
+  }
+  const meta = getModelMetaCached_();
+  if (!meta.ok) {
+    return '';
+  }
+  for (let i = 0; i < meta.items.length; i++) {
+    if (meta.items[i].id === want) {
+      return meta.items[i].reasoning;
+    }
+  }
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// T6-b: OpenRouter suggestion client (fenced: seed-only, one call, cached 6h)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the suggestion prompt from the user seed only. Never includes email
+ * content, sender, or rule data. Pure, Never throws.
+ */
+function buildSuggestionPrompt_(seed) {
+  const s = trim_(seed);
+  return 'Suggest email watch keywords.\n' +
+    'Topic the user cares about: "' + s + '".\n' +
+    'Return ' + SUGGESTION_COUNT + ' short keyword or phrase ideas that would appear in promotional emails about this topic.\n' +
+    'Rules:\n' +
+    '- Output ONLY a comma-separated list of keywords, nothing else.\n' +
+    '- Keep each keyword short (1-3 words).\n' +
+    '- Include English and Traditional Chinese variants when natural.\n' +
+    '- No numbering, no quotes, no explanation.';
+}
+
+/**
+ * Parse a model reply into clean, deduped keywords (comma/newline separated,
+ * list markers and surrounding quotes stripped), capped at SUGGESTION_COUNT.
+ * Leading digits are preserved so seeds like "5折" survive. Pure, Never throws.
+ */
+function parseSuggestions_(raw) {
+  const text = String(raw === null || raw === undefined ? '' : raw);
+  const parts = text.split(/[\n,;]+/);
+  const out = [];
+  const seen = {};
+  for (let i = 0; i < parts.length; i++) {
+    let s = trim_(parts[i]);
+    s = s.replace(/^[-\*\u2022]\s+/, '');
+    s = s.replace(/^\d+[.)\]]\s+/, '');
+    s = s.replace(/^["'`]+/, '');
+    s = s.replace(/["'`]+$/, '');
+    s = trim_(s);
+    if (!s) {
+      continue;
+    }
+    const key = s.toLowerCase();
+    if (seen[key]) {
+      continue;
+    }
+    seen[key] = true;
+    out.push(s);
+    if (out.length >= SUGGESTION_COUNT) {
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Cache key for a seed (lowercased, short deterministic hash) — pure, Never throws.
+ */
+function suggestCacheKey_(seed) {
+  const s = trim_(seed).toLowerCase();
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 31 + s.charCodeAt(i)) | 0;
+  }
+  return 'suggest_' + (h >>> 0).toString(36) + '_' + s.length;
+}
+
+/**
+ * Cached suggestion list for a seed, or null — Never throws.
+ */
+function getCachedSuggestions_(seed) {
+  try {
+    const raw = CacheService.getScriptCache().get(suggestCacheKey_(seed));
+    if (!raw) {
+      return null;
+    }
+    const arr = JSON.parse(raw);
+    return arr && arr.length ? arr : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Store a suggestion list for a seed (~6h) — Never throws (best-effort).
+ */
+function putCachedSuggestions_(seed, items) {
+  try {
+    if (items && items.length) {
+      CacheService.getScriptCache().put(suggestCacheKey_(seed), JSON.stringify(items), SUGGEST_CACHE_TTL_SECONDS);
+    }
+  } catch (e) {
+    // Caching is best-effort; a miss just costs one more call.
+  }
+}
+
+/**
+ * Map an OpenRouter HTTP code to a short English error — pure, Never throws.
+ * '' means success.
+ */
+function mapOpenRouterError_(code) {
+  if (code >= HTTP_OK_MIN && code < HTTP_OK_MAX) {
+    return '';
+  }
+  if (code === 401 || code === 403) {
+    return 'OpenRouter rejected the key. Use /setai to replace it.';
+  }
+  if (code === 402) {
+    return 'OpenRouter says out of credit.';
+  }
+  if (code === 429) {
+    return 'OpenRouter rate-limited, try again later.';
+  }
+  return 'OpenRouter error, try again.';
+}
+
+/**
+ * Build the /chat/completions request payload. Reasoning is turned off only
+ * for models we know allow it (optional/none); mandatory and unknown models
+ * omit the field so the model does not reject the request (400). max_tokens is
+ * always capped. Reads cached model metadata; Never throws.
+ */
+function buildChatRequestPayload_(model, prompt) {
+  const payload = {
+    model: model,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: SUGGESTION_MAX_TOKENS
+  };
+  const kind = getModelReasoningKind_(model);
+  if (kind === MODEL_REASONING_OPTIONAL || kind === MODEL_REASONING_NONE) {
+    payload.reasoning = { enabled: false, exclude: true };
+  }
+  return payload;
+}
+
+/**
+ * One OpenRouter /chat/completions call for the seed only. promptOverride
+ * replaces the default seed prompt (used by [More ideas] to exclude repeats).
+ * Never logs or echoes the key; errors are mapped to short English. Returns
+ * { ok, items, error }. Never throws.
+ */
+function callOpenRouter_(key, model, seed, promptOverride) {
+  const k = trim_(key);
+  const m = trim_(model);
+  if (!k || !m) {
+    return { ok: false, items: [], error: 'Set an OpenRouter key and model first (/setai).' };
+  }
+  const prompt = promptOverride ? String(promptOverride) : buildSuggestionPrompt_(seed);
+  try {
+    const resp = UrlFetchApp.fetch(
+      OPENROUTER_API_BASE + '/chat/completions',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: 'Bearer ' + k },
+        payload: JSON.stringify(buildChatRequestPayload_(m, prompt)),
+        muteHttpExceptions: true
+      }
+    );
+    const mapped = mapOpenRouterError_(resp.getResponseCode());
+    if (mapped) {
+      return { ok: false, items: [], error: mapped };
+    }
+    let content = '';
+    try {
+      const data = JSON.parse(resp.getContentText());
+      content = data && data.choices && data.choices[0] && data.choices[0].message
+        ? String(data.choices[0].message.content || '')
+        : '';
+    } catch (e2) {
+      content = '';
+    }
+    const items = parseSuggestions_(content);
+    if (!items.length) {
+      return { ok: false, items: [], error: 'OpenRouter returned no suggestions. Try again.' };
+    }
+    return { ok: true, items: items, error: '' };
+  } catch (e) {
+    return { ok: false, items: [], error: 'OpenRouter error, try again.' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T6-c: keyword ideas ([Need ideas?] opens the Mini App Ideas view; topic_hint)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when both key and model are set — suggestions enabled. Never throws.
+ */
+function isSuggestionEnabled_() {
+  return !!getOpenRouterKey_() && !!getLlmModel_();
+}
+
+/**
+ * Map a keywords-step conv to its mode ('add' | 'dup' | 'edit') — pure, Never throws.
+ */
+function modeOfKeywordsStep_(step) {
+  if (step === 'await_dup_keywords') {
+    return 'dup';
+  }
+  if (step === 'await_edit_keywords') {
+    return 'edit';
+  }
+  return 'add';
+}
+
+/**
+ * [Need ideas?] web_app button that opens the Mini App Ideas view for this chat,
+ * or null when suggestions are off or the URL cannot be built. Mints a fresh
+ * open token on every call. Never throws.
+ */
+function ideaButtonRow_(chatId) {
+  if (!isSuggestionEnabled_()) {
+    return null;
+  }
+  const minted = mintAppToken_(chatId, MINI_APP_VIEW_IDEAS, null);
+  if (!minted.ok) {
+    return null;
+  }
+  const url = buildMiniAppUrl_(MINI_APP_VIEW_IDEAS, minted.token);
+  if (!url) {
+    return null;
+  }
+  return { text: 'Need ideas?', web_app: { url: url } };
+}
+
+/**
+ * "More ideas" prompt: seed prompt + exclusion of already-shown keywords.
+ * Pure, Never throws.
+ */
+function buildMoreIdeasPrompt_(seed, exclusions) {
+  const ex = (exclusions || []).join(', ');
+  return buildSuggestionPrompt_(seed) +
+    '\n- Do NOT repeat any of these already-suggested keywords: ' + ex + '.';
+}
+
+/**
+ * Dup-sender keywords prompt (with [Need ideas?] when enabled) — Never throws.
+ */
+function showDupKeywordsPrompt_(token, chatId, dup) {
+  const rows = [];
+  const idea = ideaButtonRow_(chatId);
+  if (idea) {
+    rows.push([idea]);
+  }
+  if (getLastRule_()) {
+    rows.push([{ text: 'Use last keywords', callback_data: 'add:uselast' }]);
+  }
+  rows.push([{ text: 'Cancel', callback_data: 'add:cancel' }]);
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'That sender is already watched (keywords: ' + dup.keywordsRaw + '). Send new keywords to update it, or /cancel.',
+    { inline_keyboard: rows }
+  );
+}
+
+/**
+ * Edit-keywords prompt (with [Need ideas?] when enabled) — Never throws.
+ */
+function showEditKeywordsPrompt_(token, chatId, rule) {
+  const rows = [];
+  const idea = ideaButtonRow_(chatId);
+  if (idea) {
+    rows.push([idea]);
+  }
+  rows.push([{ text: 'Cancel', callback_data: 'add:cancel' }]);
+  sendTelegramToChat_(
+    token,
+    chatId,
+    'Editing keywords for ' + rule.sender + ' (current: ' + rule.keywordsRaw + '). Send new keywords, or /cancel.',
+    { inline_keyboard: rows }
+  );
+}
+
+/**
+ * Edit-keywords confirm (Q2=a: save requires an explicit tap) — Never throws.
+ */
+function showEditConfirm_(token, chatId, rule, keywordsRaw) {
+  const text = 'Save keywords for ' + rule.sender + '?\nCurrent: ' + rule.keywordsRaw + '\nNew: ' + keywordsRaw + '\nSend different keywords to edit, or /cancel.';
+  sendTelegramToChat_(token, chatId, text, {
+    inline_keyboard: [[
+      { text: 'Save', callback_data: 'add:confirm' },
+      { text: 'Cancel', callback_data: 'add:cancel' }
+    ]]
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -3274,12 +4421,17 @@ function sendRuleDetail_(token, chatId, id) {
  * Keywords prompt (2/3) with [Use last keywords] when a prior rule exists — Never throws.
  */
 function showAddKeywordsPrompt_(token, chatId, sender) {
-  const last = getLastRule_();
   const text = 'Add rule (2/3) for ' + sender + ': send keywords, comma-separated (OR). Example: air, 5折, "exact phrase". Send /cancel to abort.';
-  const keyboard = last
-    ? { inline_keyboard: [[{ text: 'Use last keywords', callback_data: 'add:uselast' }], [{ text: 'Cancel', callback_data: 'add:cancel' }]] }
-    : { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] };
-  sendTelegramToChat_(token, chatId, text, keyboard);
+  const rows = [];
+  const idea = ideaButtonRow_(chatId);
+  if (idea) {
+    rows.push([idea]);
+  }
+  if (getLastRule_()) {
+    rows.push([{ text: 'Use last keywords', callback_data: 'add:uselast' }]);
+  }
+  rows.push([{ text: 'Cancel', callback_data: 'add:cancel' }]);
+  sendTelegramToChat_(token, chatId, text, { inline_keyboard: rows });
 }
 
 /**
@@ -3316,17 +4468,13 @@ function handleRuleConv_(token, chatId, text, conv) {
   if (step === 'await_sender') {
     const sender = trim_(text);
     if (!isValidSender_(sender)) {
-      sendTelegramToChat_(token, chatId, 'That sender does not look like a domain or full email. Example: xxx.com or abc@xxx.com. Try again, or /cancel.');
+      sendTelegramToChat_(token, chatId, 'That sender does not look like a domain or full email. Example: xxx.com or abc@xxx.com. Try again, or /cancel.', cancelKeyboard_());
       return;
     }
     const dup = findRuleBySender_(sender);
     if (dup) {
       setConv_(chatId, { step: 'await_dup_keywords', ruleId: dup.id, sender: dup.sender });
-      const last = getLastRule_();
-      const keyboard = last
-        ? { inline_keyboard: [[{ text: 'Use last keywords', callback_data: 'add:uselast' }], [{ text: 'Cancel', callback_data: 'add:cancel' }]] }
-        : { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] };
-      sendTelegramToChat_(token, chatId, 'That sender is already watched (keywords: ' + dup.keywordsRaw + '). Send new keywords to update it, or /cancel.', keyboard);
+      showDupKeywordsPrompt_(token, chatId, dup);
       return;
     }
     setConv_(chatId, { step: 'await_keywords', sender: sender });
@@ -3335,7 +4483,7 @@ function handleRuleConv_(token, chatId, text, conv) {
   }
   if (step === 'await_keywords' || step === 'await_confirm') {
     if (!hasKeywords_(text)) {
-      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.');
+      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.', cancelKeyboard_());
       return;
     }
     const sender = trim_(conv.sender);
@@ -3352,7 +4500,7 @@ function handleRuleConv_(token, chatId, text, conv) {
   }
   if (step === 'await_dup_keywords' || step === 'await_dup_confirm') {
     if (!hasKeywords_(text)) {
-      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.');
+      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.', cancelKeyboard_());
       return;
     }
     const target = findRuleById_(conv.ruleId);
@@ -3366,9 +4514,9 @@ function handleRuleConv_(token, chatId, text, conv) {
     showDupConfirm_(token, chatId, target, keywordsRaw);
     return;
   }
-  if (step === 'await_edit_keywords') {
+  if (step === 'await_edit_keywords' || step === 'await_edit_confirm') {
     if (!hasKeywords_(text)) {
-      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.');
+      sendTelegramToChat_(token, chatId, 'Keywords cannot be empty. Send comma-separated keywords, or /cancel.', cancelKeyboard_());
       return;
     }
     const target = findRuleById_(conv.ruleId);
@@ -3377,19 +4525,15 @@ function handleRuleConv_(token, chatId, text, conv) {
       sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
       return;
     }
-    const res = updateRuleById_(target.id, { keywordsRaw: trim_(text) });
-    clearConv_(chatId);
-    if (res.ok) {
-      sendTelegramToChat_(token, chatId, 'Rule updated (' + target.sender + ').');
-    } else {
-      sendTelegramToChat_(token, chatId, 'Could not update the rule: ' + res.error + ' Send /list to retry.');
-    }
+    const keywordsRaw = trim_(text);
+    setConv_(chatId, { step: 'await_edit_confirm', ruleId: target.id, keywordsRaw: keywordsRaw });
+    showEditConfirm_(token, chatId, target, keywordsRaw);
     return;
   }
   if (step === 'await_edit_sender') {
     const sender = trim_(text);
     if (!isValidSender_(sender)) {
-      sendTelegramToChat_(token, chatId, 'That sender does not look like a domain or full email. Example: xxx.com or abc@xxx.com. Try again, or /cancel.');
+      sendTelegramToChat_(token, chatId, 'That sender does not look like a domain or full email. Example: xxx.com or abc@xxx.com. Try again, or /cancel.', cancelKeyboard_());
       return;
     }
     const target = findRuleById_(conv.ruleId);
@@ -3400,7 +4544,7 @@ function handleRuleConv_(token, chatId, text, conv) {
     }
     const clash = findRuleBySender_(sender);
     if (clash && String(clash.id) !== String(target.id)) {
-      sendTelegramToChat_(token, chatId, 'That sender is already watched by another rule. Pick a different sender, or /cancel.');
+      sendTelegramToChat_(token, chatId, 'That sender is already watched by another rule. Pick a different sender, or /cancel.', cancelKeyboard_());
       return;
     }
     const res = updateRuleById_(target.id, { sender: sender });
@@ -3437,7 +4581,7 @@ function handleRuleCallback_(token, chatId, data, messageId, callbackId) {
     const last = getLastRule_();
     if (!last) {
       answerTelegramCallback_(token, callbackId, 'No prior rule');
-      sendTelegramToChat_(token, chatId, 'No prior rule yet. Send keywords, or /cancel.');
+      sendTelegramToChat_(token, chatId, 'No prior rule yet. Send keywords, or /cancel.', cancelKeyboard_());
       return;
     }
     if (!conv || (conv.step !== 'await_keywords' && conv.step !== 'await_dup_keywords')) {
@@ -3464,9 +4608,34 @@ function handleRuleCallback_(token, chatId, data, messageId, callbackId) {
   }
   if (d === 'add:confirm') {
     const conv = getConv_(chatId);
-    if (!conv || (conv.step !== 'await_confirm' && conv.step !== 'await_dup_confirm')) {
+    if (!conv || (conv.step !== 'await_confirm' && conv.step !== 'await_dup_confirm' && conv.step !== 'await_edit_confirm')) {
       answerTelegramCallback_(token, callbackId, 'Expired');
       sendTelegramToChat_(token, chatId, 'Session expired. Send /add to restart.');
+      return;
+    }
+    // topic_hint is the seed, written only when suggestions were actually used.
+    const hint = (conv.usedSuggestion && conv.seed) ? String(conv.seed) : undefined;
+    if (conv.step === 'await_edit_confirm') {
+      const target = findRuleById_(conv.ruleId);
+      if (!target) {
+        clearConv_(chatId);
+        answerTelegramCallback_(token, callbackId, 'Not found');
+        sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
+        return;
+      }
+      const fields = { keywordsRaw: conv.keywordsRaw };
+      if (hint !== undefined) {
+        fields.topicHint = hint;
+      }
+      const res = updateRuleById_(target.id, fields);
+      clearConv_(chatId);
+      if (res.ok) {
+        answerTelegramCallback_(token, callbackId, 'Updated');
+        sendTelegramToChat_(token, chatId, 'Rule updated (' + target.sender + ').');
+      } else {
+        answerTelegramCallback_(token, callbackId, 'Failed');
+        sendTelegramToChat_(token, chatId, 'Could not update the rule: ' + res.error + ' Send /list to retry.');
+      }
       return;
     }
     if (conv.step === 'await_dup_confirm') {
@@ -3477,7 +4646,11 @@ function handleRuleCallback_(token, chatId, data, messageId, callbackId) {
         sendTelegramToChat_(token, chatId, 'Rule not found. It may have been deleted. Send /list to refresh.');
         return;
       }
-      const res = updateRuleById_(target.id, { keywordsRaw: conv.keywordsRaw });
+      const fields = { keywordsRaw: conv.keywordsRaw };
+      if (hint !== undefined) {
+        fields.topicHint = hint;
+      }
+      const res = updateRuleById_(target.id, fields);
       clearConv_(chatId);
       if (res.ok) {
         answerTelegramCallback_(token, callbackId, 'Updated');
@@ -3506,7 +4679,11 @@ function handleRuleCallback_(token, chatId, data, messageId, callbackId) {
     // Re-check duplicate (race): fall into the update path when taken.
     const dup = findRuleBySender_(conv.sender);
     if (dup) {
-      const res = updateRuleById_(dup.id, { keywordsRaw: conv.keywordsRaw });
+      const dupFields = { keywordsRaw: conv.keywordsRaw };
+      if (hint !== undefined) {
+        dupFields.topicHint = hint;
+      }
+      const res = updateRuleById_(dup.id, dupFields);
       clearConv_(chatId);
       if (res.ok) {
         answerTelegramCallback_(token, callbackId, 'Updated');
@@ -3517,7 +4694,7 @@ function handleRuleCallback_(token, chatId, data, messageId, callbackId) {
       }
       return;
     }
-    const res = appendRule_(trim_(conv.sender), trim_(conv.keywordsRaw));
+    const res = appendRule_(trim_(conv.sender), trim_(conv.keywordsRaw), hint === undefined ? '' : hint);
     const senderEcho = trim_(conv.sender);
     clearConv_(chatId);
     if (res.ok) {
@@ -3581,7 +4758,7 @@ function handleRuleCallback_(token, chatId, data, messageId, callbackId) {
     }
     setConv_(chatId, { step: 'await_edit_keywords', ruleId: rule.id });
     answerTelegramCallback_(token, callbackId, 'Send keywords');
-    sendTelegramToChat_(token, chatId, 'Editing keywords for ' + rule.sender + ' (current: ' + rule.keywordsRaw + '). Send new keywords, or /cancel.', { inline_keyboard: [[{ text: 'Cancel', callback_data: 'add:cancel' }]] });
+    showEditKeywordsPrompt_(token, chatId, rule);
     return;
   }
   if (d.indexOf('rule:esender:') === 0) {
@@ -3675,6 +4852,7 @@ function telegramSetMyCommands_(token) {
     { command: 'interval', description: 'Polling interval' },
     { command: 'status', description: 'Watcher status' },
     { command: 'help', description: 'Command help' },
+    { command: 'setai', description: 'OpenRouter key + model for keyword ideas' },
     { command: 'transfer', description: 'Move to this account' },
     { command: 'connect', description: 'Replace bot token' }
   ];
@@ -3847,6 +5025,8 @@ function handleStatus_(token, chatId) {
     'Interval: every ' + formatIntervalLabel_(interval),
     'Rules: ' + rules.length + ' (' + enabled + ' enabled)',
     'Last run: ' + (last && last.when ? last.when + ' (found ' + (last.found || '0') + ', sent ' + (last.sent || '0') + ')' : 'none yet'),
+    'Suggestions: ' + (isSuggestionEnabled_() ? 'on' : 'off'),
+    'Model: ' + currentModelLabel_(),
     'Error: ' + (pending || 'none')
   ];
   sendTelegramToChat_(token, chatId, lines.join('\n'));
@@ -3865,6 +5045,7 @@ function handleHelp_(token, chatId) {
     '/interval - polling interval\n' +
     '/status - watcher status\n' +
     '/help - this help\n' +
+    '/setai - OpenRouter key + model (keyword ideas)\n' +
     '/transfer - move the watcher to this account\n' +
     '/connect - replace the bot token\n' +
     'One digest per run; silence means no matches.'

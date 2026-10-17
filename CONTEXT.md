@@ -6,7 +6,7 @@ Watch Gmail for promotion emails from user-chosen senders (domain or full email)
 
 MVP is single-user; future non-tech users via per-copy deployment.
 
-T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c done (rule CRUD + `/cancel` everywhere) + T5-d done (interval/status/help + `setMyCommands` menu) + T5-e done (`T5-TestingPlan.md` + `TestT5.gs`); T6–T8 planned (see Build plan).
+T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c done (rule CRUD + `/cancel` everywhere) + T5-d done (interval/status/help + `setMyCommands` menu) + T5-e done (`T5-TestingPlan.md` + `TestT5.gs`); T6 suggestion done via a Telegram Mini App (`/setai` Settings + `[Need ideas?]` Ideas view) — T6-a…T6-m done; T7–T8 planned (see Build plan).
 
 Architecture below is the intended design unless the user changes it.
 Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
@@ -40,6 +40,7 @@ Stack:
   - The only surface touched daily.
   - Button-first; raw typing is fallback only; free-text control rejected; persistent reply keyboard never built.
   - Add-rule is sender → keywords → confirm; keywords step offers `[Use last keywords]` (hidden when no prior rule exists), filling keywords from the most recently created rule for confirm/edit.
+  - Mini App (`src/MiniApp.html`, served by `doGet`): one page, two views — Settings (`/setai`: OpenRouter key + model) and Ideas (`[Need ideas?]`: type a topic → chips → hand back to the chat confirm). Opened by a bot-issued `web_app` button; dark theme; works on mobile and desktop/web Telegram (`XFrameOptionsMode.ALLOWALL`, T6-m).
 
 - Access:
   - Single owner, DM-only.
@@ -50,7 +51,7 @@ Stack:
   - Gmail polling / matching / digest.
   - `doPost` command + callback router.
   - Per-chat conversation state in `CacheService` (`conv_<chat_id>`, 10-min TTL).
-  - Setup / transfer / connect flows (suggestion UI hidden until T6).
+  - Setup / transfer / connect flows (suggestions live in the Mini App since T6).
 
 - Setup is idempotent per deployment:
   - `ensureSchema()` + trigger creation (no duplicates) + `getMe` token validation + `setWebhook` to a manually pasted `/exec` URL (stored as `webapp_url`; `getService().getUrl()` returns login-walled `/dev`, Telegram gets 401) + binding-link generation.
@@ -126,7 +127,7 @@ Stack:
   - Each user deploys their own copy, so keys stay in their own account and the template author cannot see them.
 
 - Secret entry:
-  - Via own-bot DM (`/setkey`, `/setmodel`).
+  - Via own-bot DM: `/setai` opens Mini App Settings (OpenRouter key + model); the key is validated, stored, and only ever shown masked with a delete action.
   - Masked echo, immediate `deleteMessage`, DM-only.
   - Code must never log, echo, or persist full keys; audit for exfiltration.
   - `llm_model`/key blank = suggestion disabled with pricing warning; no default model.
@@ -165,10 +166,17 @@ Stack:
   - T5-a (done): `doPost` router + auth gate (URL `secret` check — Apps Script cannot read the `secret_token` header — DM-only, owner allowlist, silent ignore for strangers/groups).
   - T5-b (done): Sheet `Setup` (menu item only) + `/start <token>` bind + `/transfer` + `/connect` (both with inline confirm); `rule_<id>` mirror cache; English UI first.
   - T5-c/d/e (done): rule CRUD (`/list` 10/page, 2 buttons/row, → detail with Enable/Disable + Edit keywords/sender + Delete-confirm, duplicate sender → edit, 30-enabled block at entry; keywords validated by `parseKeywords`, empty rejected; Cancel button on every input step) + interval (inline fixed dropdown) / status (interval + rule count + last run + `last_error`) / help + command menu (`setMyCommands` in Setup/re-attach) + unknown → short help (strangers/groups stay silent) + `T5-TestingPlan.md` + `TestT5.gs`; English-first.
-  - Deferred: suggestion UI + `/setkey` + `/setmodel` stay in T6; `topic_hint` unused until T6.
+  - Deferred to T6 (now done): suggestion UI + key/model entry via the Mini App (`/setai`); `topic_hint` written on confirm.
 
-- T6 — Suggestion (optional):
-  Fenced OpenRouter seed-only flow per above.
+- T6 — Suggestion (optional; Telegram Mini App):
+  - T6-a/b/c (superseded): key/model storage, OpenRouter suggestion client, and in-chat idea chips (replaced by T6-i).
+  - T6-d/i (done): one Mini App page (`src/MiniApp.html`) served by `doGet` behind a bot-issued open token; single `/setai` replaces `/setkey`+`/setmodel`; `[Need ideas?]` is a direct `web_app` button.
+  - T6-e (done): `model_meta` metadata cache (`CacheService`) + reasoning-off / `max_tokens` request tuning.
+  - T6-f/g (done): Settings view — key set/replace (masked)/delete; model search/pick/clear; free-only filter.
+  - T6-h (done): Ideas view — type a topic → suggestions (toggle chips, ≤3 batches) → add hands back to the chat confirm.
+  - T6-k (done): responsive layout for small screens (narrow gutters + field rows wrap to full width; wide screens capped to a reading width).
+  - T6-l (done): mobile viewport fix — Apps Script ignores meta tags in the HTML file, so `serveMiniApp_`/`serveMiniAppError_` inject the viewport via `HtmlOutput.addMetaTag` (`MINI_APP_VIEWPORT`); the inline `<meta name="viewport">` in `MiniApp.html` was removed. Fixes tiny/desktop-scaled rendering on phones.
+  - T6-m (done): desktop/web framing fix — `serveMiniApp_`/`serveMiniAppError_` set `XFrameOptionsMode.ALLOWALL`, so Telegram Desktop/Web (which load the Mini App in a frame) display it instead of the browser's `xframe-neterror-page`; the minted token + owner check remains the guard.
 
 - T7 — Static site + README:
   Bilingual `docs/index.html` + minimal README with `copy` link; BotFather -> copy -> Setup -> bind guide.

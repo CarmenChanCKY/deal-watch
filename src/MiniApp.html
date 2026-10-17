@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Deal Watch</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #17212b;
+      --surface: #1f2b38;
+      --sep: #101921;
+      --text: #e9edf2;
+      --muted: #8b9aa9;
+      --accent: #2ea6ff;
+      --accent-soft: rgba(46, 166, 255, .16);
+      --free: #7ee787;
+      --free-bg: rgba(63, 185, 80, .15);
+      --paid: #c7d0da;
+      --paid-bg: rgba(139, 154, 169, .15);
+      --danger: #f28b82;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      line-height: 1.45;
+      -webkit-text-size-adjust: 100%;
+      padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    }
+    .view[hidden] { display: none; }
+
+    .appbar {
+      padding: calc(12px + env(safe-area-inset-top)) 16px 8px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--sep);
+    }
+    .appbar-title { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
+    .current-line { display: flex; align-items: baseline; gap: 8px; font-size: 14px; }
+    .current-label { color: var(--muted); flex-shrink: 0; }
+    .current-value {
+      min-width: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .current-line .linkbtn { margin-left: auto; }
+
+    .linkbtn {
+      flex-shrink: 0;
+      padding: 4px 6px;
+      border: 0;
+      background: none;
+      color: var(--accent);
+      font: inherit;
+      font-size: 14px;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    .linkbtn:active { opacity: .6; }
+    .linkbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .linkbtn.danger { color: var(--danger); }
+
+    .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; line-height: 1.3; }
+    .badge-on { color: var(--free); background: var(--free-bg); }
+    .badge-off { color: var(--muted); background: var(--paid-bg); }
+
+    .statusbar span { display: block; padding-top: 6px; font-size: 13px; color: var(--muted); }
+    .statusbar span.ok { color: var(--free); }
+    .statusbar span.err { color: var(--danger); }
+
+    .panel { padding: 14px 16px; background: var(--bg); border-bottom: 1px solid var(--sep); }
+    .section-label { display: block; margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
+
+    .textfield {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 12px;
+      font: inherit;
+      color: var(--text);
+      background: var(--surface);
+      border: 1px solid var(--sep);
+      border-radius: var(--radius);
+      -webkit-appearance: none;
+    }
+    .textfield::placeholder { color: var(--muted); }
+    .textfield:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    input[type="password"].textfield { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 16px; }
+
+    .toggle {
+      flex-shrink: 0;
+      padding: 12px;
+      font: inherit;
+      font-size: 14px;
+      color: var(--muted);
+      background: var(--surface);
+      border: 1px solid var(--sep);
+      border-radius: var(--radius);
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    .toggle[aria-pressed="true"] { color: #04121f; background: var(--accent); border-color: var(--accent); }
+    .toggle:active { transform: scale(.97); }
+    .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    .primary {
+      padding: 12px 16px;
+      border: 0;
+      border-radius: var(--radius);
+      background: var(--accent);
+      color: #04121f;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    .primary:active { transform: scale(.98); }
+    .primary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .primary[disabled] { opacity: .5; pointer-events: none; }
+
+    .keyline { display: flex; align-items: center; gap: 10px; }
+    .key-masked {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+    .keyfield { display: flex; align-items: center; gap: 8px; }
+    .keyactions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+
+    .searchbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--sep);
+    }
+
+    .empty { padding: 24px 16px; text-align: center; color: var(--muted); font-size: 14px; }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      padding: 12px 16px;
+      text-align: left;
+      font: inherit;
+      color: var(--text);
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--sep);
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background .12s ease;
+    }
+    .row:active { background: var(--accent-soft); }
+    .row.selected { background: var(--accent-soft); }
+    .row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .row-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+    .row-sub { font-size: 12px; color: var(--muted); }
+    .row-tail { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+
+    .pill { padding: 4px 8px; border-radius: 999px; font-size: 12px; line-height: 1; white-space: nowrap; }
+    .pill-free { color: var(--free); background: var(--free-bg); }
+    .pill-paid { color: var(--paid); background: var(--paid-bg); }
+
+    .check { display: none; width: 18px; height: 18px; flex-shrink: 0; color: var(--accent); }
+    .row.selected .check { display: block; }
+
+    .spinner {
+      display: none;
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      border: 2px solid var(--muted);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .row.saving { opacity: .6; pointer-events: none; }
+    .row.saving .spinner { display: block; }
+    .row.saving .pill,
+    .row.saving .check { display: none; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px; }
+    .chip {
+      max-width: 100%;
+      padding: 10px 14px;
+      border: 1px solid var(--sep);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+      text-align: left;
+      overflow-wrap: anywhere;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background .12s ease, border-color .12s ease;
+    }
+    .chip:active { transform: scale(.97); }
+    .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+    .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    .ideaactions { display: flex; gap: 8px; padding: 0 16px 16px; }
+    .ideaactions .primary { flex: 1 1 auto; }
+
+    /* Wide screens: keep a comfortable reading width instead of full-bleed rows. */
+    @media (min-width: 640px) {
+      .appbar, .panel, .searchbar, .list, .chips, .ideaactions, .empty {
+        max-width: 640px;
+        margin-left: auto;
+        margin-right: auto;
+      }
+    }
+
+    /* Narrow screens: tighter gutters and let field rows wrap to full width. */
+    @media (max-width: 380px) {
+      .appbar, .panel, .chips { padding-left: 12px; padding-right: 12px; }
+      .searchbar { padding-left: 12px; padding-right: 12px; }
+      .row { padding-left: 12px; padding-right: 12px; }
+      .keyfield, .searchbar { flex-wrap: wrap; }
+      .keyfield .textfield, .searchbar .textfield { flex-basis: 100%; }
+      .keyfield .primary, .keyfield .toggle, .searchbar .toggle { width: 100%; }
+      .ideaactions { flex-direction: column; }
+      .ideaactions .primary, .ideaactions .toggle { width: 100%; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .spinner { animation: none; }
+      .row, .chip { transition: none; }
+      .row:active, .toggle:active, .primary:active, .chip:active { transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <section id="view-settings" class="view">
+    <header class="appbar">
+      <h1 class="appbar-title"><?= appName ?></h1>
+      <div class="current-line">
+        <span class="current-label">Current model</span>
+        <span class="current-value" id="current-value">…</span>
+        <button id="clear" class="linkbtn" type="button">Clear</button>
+      </div>
+      <div class="current-line">
+        <span class="current-label">Suggestions</span>
+        <span id="suggestions" class="badge badge-off">…</span>
+      </div>
+      <div class="statusbar"><span id="status" role="status" aria-live="polite"></span></div>
+    </header>
+
+    <section class="panel">
+      <h2 class="section-label">OpenRouter key</h2>
+      <div id="key-view"></div>
+    </section>
+
+    <div class="searchbar">
+      <input id="q" class="textfield" type="search" inputmode="search" placeholder="Search models" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Search models">
+      <button id="freeonly" class="toggle" type="button" aria-pressed="false">Free only</button>
+    </div>
+
+    <main id="results" class="list" aria-label="Model results"></main>
+  </section>
+
+  <section id="view-ideas" class="view" hidden>
+    <header class="appbar">
+      <h1 class="appbar-title">Keyword ideas</h1>
+      <div class="statusbar"><span id="idea-status" role="status" aria-live="polite"></span></div>
+    </header>
+
+    <section class="panel">
+      <label class="section-label" for="topic">Topic</label>
+      <div class="keyfield">
+        <input id="topic" class="textfield" type="text" placeholder="e.g. sneaker, 波鞋" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Topic">
+        <button id="idea-get" class="primary" type="button">Get ideas</button>
+      </div>
+      <p class="hint">Tap keywords to select, then Add selected. Uses your OpenRouter key — calls are billed to you.</p>
+    </section>
+
+    <div id="idea-chips" class="chips"></div>
+
+    <div id="idea-actions" class="ideaactions" hidden>
+      <button id="idea-add" class="primary" type="button">Add selected</button>
+      <button id="idea-more" class="toggle" type="button">More ideas</button>
+    </div>
+  </section>
+
+  <script>
+    var APP_TOKEN = <?!= JSON.stringify(appToken) ?>;
+    var VIEW = <?!= JSON.stringify(view) ?>;
+
+    function el(id) {
+      return document.getElementById(id);
+    }
+
+    function trim(v) {
+      return String(v === null || v === undefined ? '' : v).replace(/^\s+|\s+$/g, '');
+    }
+
+    var statusTimer = null;
+
+    function setLive(id, text, kind) {
+      var s = el(id);
+      if (!s) {
+        return;
+      }
+      if (statusTimer) {
+        clearTimeout(statusTimer);
+        statusTimer = null;
+      }
+      s.textContent = text || '';
+      s.className = kind || '';
+      if (text && kind === 'ok') {
+        statusTimer = setTimeout(function () {
+          s.textContent = '';
+          s.className = '';
+        }, 3000);
+      }
+    }
+
+    function debounce(fn, ms) {
+      var t = null;
+      return function () {
+        var self = this;
+        var args = arguments;
+        if (t) {
+          clearTimeout(t);
+        }
+        t = setTimeout(function () {
+          fn.apply(self, args);
+        }, ms);
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings view
+    // -----------------------------------------------------------------------
+    function initSettings() {
+      var currentModel = '';
+      var hasKey = false;
+      var keyMasked = '';
+      var keyEditing = false;
+      var lastItems = [];
+      var reqSeq = 0;
+      var busy = false;
+
+      function setStatus(text, kind) {
+        setLive('status', text, kind);
+      }
+
+      function applyState(state) {
+        if (!state) {
+          return;
+        }
+        hasKey = !!state.hasKey;
+        keyMasked = state.keyMasked || '';
+        currentModel = state.model || '';
+        el('current-value').textContent = currentModel || 'none';
+        var b = el('suggestions');
+        b.textContent = state.suggestions ? 'On' : 'Off';
+        b.className = 'badge ' + (state.suggestions ? 'badge-on' : 'badge-off');
+      }
+
+      function subLabelFor(m) {
+        return m.reasoning === 'mandatory' ? 'Reasoning always on' : '';
+      }
+
+      function buildRow(m) {
+        var isCurrent = m.id === currentModel;
+        var row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'row' + (isCurrent ? ' selected' : '');
+        row.setAttribute('aria-pressed', isCurrent ? 'true' : 'false');
+        row.setAttribute('aria-label', m.id + (m.free ? ', free' : ', paid'));
+
+        var main = document.createElement('span');
+        main.className = 'row-main';
+        var idEl = document.createElement('span');
+        idEl.className = 'row-id';
+        idEl.textContent = m.id;
+        main.appendChild(idEl);
+        var sub = subLabelFor(m);
+        if (sub) {
+          var subEl = document.createElement('span');
+          subEl.className = 'row-sub';
+          subEl.textContent = sub;
+          main.appendChild(subEl);
+        }
+
+        var tail = document.createElement('span');
+        tail.className = 'row-tail';
+        var pill = document.createElement('span');
+        pill.className = 'pill ' + (m.free ? 'pill-free' : 'pill-paid');
+        pill.textContent = m.free ? 'Free' : 'Paid';
+        var spinner = document.createElement('span');
+        spinner.className = 'spinner';
+        spinner.setAttribute('aria-hidden', 'true');
+        var check = document.createElement('span');
+        check.className = 'check';
+        check.setAttribute('aria-hidden', 'true');
+        check.innerHTML = '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.5l4 4 8-9"/></svg>';
+        tail.appendChild(pill);
+        tail.appendChild(spinner);
+        tail.appendChild(check);
+
+        row.appendChild(main);
+        row.appendChild(tail);
+        row.addEventListener('click', function () {
+          pickModel(m.id, row);
+        });
+        return row;
+      }
+
+      function renderResults(items) {
+        var box = el('results');
+        box.textContent = '';
+        if (!items.length) {
+          var empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = 'No matches. Try another keyword.';
+          box.appendChild(empty);
+          return;
+        }
+        for (var i = 0; i < items.length; i++) {
+          box.appendChild(buildRow(items[i]));
+        }
+      }
+
+      function renderKey() {
+        var box = el('key-view');
+        box.textContent = '';
+
+        if (hasKey && !keyEditing) {
+          var line = document.createElement('div');
+          line.className = 'keyline';
+          var masked = document.createElement('span');
+          masked.className = 'key-masked';
+          masked.textContent = keyMasked || 'saved';
+          var replace = document.createElement('button');
+          replace.type = 'button';
+          replace.className = 'linkbtn';
+          replace.textContent = 'Replace';
+          replace.addEventListener('click', function () {
+            keyEditing = true;
+            renderKey();
+          });
+          var remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'linkbtn danger';
+          remove.textContent = 'Remove';
+          remove.addEventListener('click', removeKey);
+          line.appendChild(masked);
+          line.appendChild(replace);
+          line.appendChild(remove);
+          box.appendChild(line);
+          return;
+        }
+
+        var field = document.createElement('div');
+        field.className = 'keyfield';
+        var input = document.createElement('input');
+        input.id = 'key-input';
+        input.className = 'textfield';
+        input.type = 'password';
+        input.placeholder = 'sk-or-v1…';
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('autocapitalize', 'off');
+        input.setAttribute('spellcheck', 'false');
+        input.setAttribute('aria-label', 'OpenRouter API key');
+        var show = document.createElement('button');
+        show.type = 'button';
+        show.className = 'toggle';
+        show.setAttribute('aria-pressed', 'false');
+        show.textContent = 'Show';
+        show.addEventListener('click', function () {
+          var on = show.getAttribute('aria-pressed') === 'true';
+          show.setAttribute('aria-pressed', on ? 'false' : 'true');
+          show.textContent = on ? 'Show' : 'Hide';
+          input.type = on ? 'password' : 'text';
+        });
+        field.appendChild(input);
+        field.appendChild(show);
+        box.appendChild(field);
+
+        var actions = document.createElement('div');
+        actions.className = 'keyactions';
+        var save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'primary';
+        save.textContent = 'Save key';
+        save.addEventListener('click', saveKey);
+        actions.appendChild(save);
+        if (hasKey) {
+          var cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.className = 'linkbtn';
+          cancel.textContent = 'Cancel';
+          cancel.addEventListener('click', function () {
+            keyEditing = false;
+            renderKey();
+          });
+          actions.appendChild(cancel);
+        }
+        box.appendChild(actions);
+
+        var hint = document.createElement('p');
+        hint.className = 'hint';
+        hint.textContent = 'Calls are billed to your OpenRouter account.';
+        box.appendChild(hint);
+
+        if (keyEditing) {
+          input.focus();
+        }
+      }
+
+      function loadState() {
+        if (!APP_TOKEN) {
+          setStatus('Missing token. Open this page from Telegram.', 'err');
+          return;
+        }
+        google.script.run
+          .withSuccessHandler(function (res) {
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Session expired.', 'err');
+              return;
+            }
+            applyState(res.state);
+            renderKey();
+          })
+          .withFailureHandler(function () {
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppGetState(APP_TOKEN);
+      }
+
+      function loadModels() {
+        if (!APP_TOKEN) {
+          setStatus('Missing token. Open this page from Telegram.', 'err');
+          return;
+        }
+        if (busy) {
+          return;
+        }
+        var seq = ++reqSeq;
+        var q = el('q').value;
+        var freeOnly = el('freeonly').getAttribute('aria-pressed') === 'true';
+        setStatus('Searching…');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            if (seq !== reqSeq) {
+              return;
+            }
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Search failed.', 'err');
+              return;
+            }
+            applyState(res.state);
+            lastItems = res.items || [];
+            renderResults(lastItems);
+            setStatus('');
+          })
+          .withFailureHandler(function () {
+            if (seq !== reqSeq) {
+              return;
+            }
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppGetModels(APP_TOKEN, q, freeOnly);
+      }
+
+      function pickModel(id, row) {
+        if (busy) {
+          return;
+        }
+        if (id === currentModel) {
+          setStatus('Already using ' + id + '.', 'ok');
+          return;
+        }
+        busy = true;
+        row.classList.add('saving');
+        setStatus('');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            busy = false;
+            row.classList.remove('saving');
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Could not save.', 'err');
+              return;
+            }
+            applyState(res.state);
+            renderResults(lastItems);
+            setStatus('Saved ' + currentModel + '.', 'ok');
+          })
+          .withFailureHandler(function () {
+            busy = false;
+            row.classList.remove('saving');
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppSetModel(APP_TOKEN, id);
+      }
+
+      function clearModel() {
+        if (busy) {
+          return;
+        }
+        busy = true;
+        setStatus('Clearing…');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            busy = false;
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Could not clear.', 'err');
+              return;
+            }
+            applyState(res.state);
+            renderResults(lastItems);
+            setStatus('Model cleared.', 'ok');
+          })
+          .withFailureHandler(function () {
+            busy = false;
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppClearModel(APP_TOKEN);
+      }
+
+      function saveKey() {
+        if (busy) {
+          return;
+        }
+        var input = el('key-input');
+        var raw = input ? input.value : '';
+        if (!raw) {
+          setStatus('Enter your OpenRouter key.', 'err');
+          return;
+        }
+        busy = true;
+        setStatus('Checking key…');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            busy = false;
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Key rejected.', 'err');
+              return;
+            }
+            applyState(res.state);
+            keyEditing = false;
+            renderKey();
+            setStatus('Key saved.', 'ok');
+          })
+          .withFailureHandler(function () {
+            busy = false;
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppSetKey(APP_TOKEN, raw);
+      }
+
+      function removeKey() {
+        if (busy) {
+          return;
+        }
+        if (!window.confirm('Remove the stored OpenRouter key? Suggestions turn off.')) {
+          return;
+        }
+        busy = true;
+        setStatus('Removing…');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            busy = false;
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Could not remove.', 'err');
+              return;
+            }
+            applyState(res.state);
+            keyEditing = false;
+            renderKey();
+            setStatus('Key removed.', 'ok');
+          })
+          .withFailureHandler(function () {
+            busy = false;
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppDeleteKey(APP_TOKEN);
+      }
+
+      el('q').addEventListener('input', debounce(loadModels, 300));
+      el('q').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          loadModels();
+        }
+      });
+      el('freeonly').addEventListener('click', function () {
+        var on = this.getAttribute('aria-pressed') === 'true';
+        this.setAttribute('aria-pressed', on ? 'false' : 'true');
+        loadModels();
+      });
+      el('clear').addEventListener('click', clearModel);
+
+      el('current-value').textContent = 'none';
+      renderKey();
+      loadState();
+      loadModels();
+    }
+
+    // -----------------------------------------------------------------------
+    // Ideas view
+    // -----------------------------------------------------------------------
+    function initIdeas() {
+      var ideaSeed = '';
+      var ideaItems = [];
+      var ideaSelected = {};
+      var ideaBatches = 0;
+      var ideaBusy = false;
+      var ideaSent = false;
+
+      function setStatus(text, kind) {
+        setLive('idea-status', text, kind);
+      }
+
+      function renderChips() {
+        var box = el('idea-chips');
+        box.textContent = '';
+        for (var i = 0; i < ideaItems.length; i++) {
+          (function (idx) {
+            var chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'chip';
+            chip.setAttribute('aria-pressed', ideaSelected[idx] ? 'true' : 'false');
+            chip.textContent = ideaItems[idx];
+            chip.addEventListener('click', function () {
+              if (ideaSelected[idx]) {
+                delete ideaSelected[idx];
+              } else {
+                ideaSelected[idx] = true;
+              }
+              chip.setAttribute('aria-pressed', ideaSelected[idx] ? 'true' : 'false');
+              if (ideaSent) {
+                ideaSent = false;
+                el('idea-add').disabled = false;
+              }
+            });
+            box.appendChild(chip);
+          })(i);
+        }
+      }
+
+      function showActions(on) {
+        el('idea-actions').hidden = !on;
+      }
+
+      function extractIdeas(items) {
+        ideaItems = items || [];
+        ideaSelected = {};
+        ideaSent = false;
+        el('idea-add').disabled = false;
+        el('idea-more').disabled = false;
+        renderChips();
+        showActions(ideaItems.length > 0);
+      }
+
+      function getIdeas() {
+        var seed = trim(el('topic').value);
+        if (!seed) {
+          setStatus('Type a topic first.', 'err');
+          return;
+        }
+        if (ideaBusy) {
+          return;
+        }
+        ideaBusy = true;
+        setStatus('Searching…');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            ideaBusy = false;
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Could not get ideas.', 'err');
+              return;
+            }
+            ideaSeed = seed;
+            ideaBatches = 1;
+            extractIdeas(res.items);
+            setStatus(ideaItems.length + ' ideas. Tap to select.');
+          })
+          .withFailureHandler(function () {
+            ideaBusy = false;
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppSuggest(APP_TOKEN, seed, null);
+      }
+
+      function moreIdeas() {
+        if (ideaBusy) {
+          return;
+        }
+        if (!ideaSeed || ideaBatches >= 3) {
+          setStatus('No more ideas for now.', 'err');
+          return;
+        }
+        ideaBusy = true;
+        el('idea-more').disabled = true;
+        setStatus('Searching…');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            ideaBusy = false;
+            el('idea-more').disabled = false;
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Could not get ideas.', 'err');
+              return;
+            }
+            var seen = {};
+            for (var i = 0; i < ideaItems.length; i++) {
+              seen[String(ideaItems[i]).toLowerCase()] = true;
+            }
+            var added = 0;
+            for (var j = 0; j < res.items.length; j++) {
+              var kk = String(res.items[j]).toLowerCase();
+              if (!seen[kk]) {
+                seen[kk] = true;
+                ideaItems.push(res.items[j]);
+                added++;
+              }
+            }
+            ideaBatches++;
+            renderChips();
+            showActions(ideaItems.length > 0);
+            setStatus(added ? added + ' more ideas.' : 'No new ideas. Try a different topic.', added ? 'ok' : 'err');
+          })
+          .withFailureHandler(function () {
+            ideaBusy = false;
+            el('idea-more').disabled = false;
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppSuggest(APP_TOKEN, ideaSeed, ideaItems);
+      }
+
+      function addSelected() {
+        if (ideaBusy) {
+          return;
+        }
+        var picked = [];
+        for (var i = 0; i < ideaItems.length; i++) {
+          if (ideaSelected[i]) {
+            picked.push(ideaItems[i]);
+          }
+        }
+        if (!picked.length) {
+          setStatus('Select at least one keyword.', 'err');
+          return;
+        }
+        ideaBusy = true;
+        setStatus('Sending…');
+        google.script.run
+          .withSuccessHandler(function (res) {
+            ideaBusy = false;
+            if (!res || !res.ok) {
+              setStatus(res && res.error ? res.error : 'Could not send.', 'err');
+              return;
+            }
+            ideaSent = true;
+            el('idea-add').disabled = true;
+            setStatus('Sent to Telegram. Open the chat to confirm.', 'ok');
+          })
+          .withFailureHandler(function () {
+            ideaBusy = false;
+            setStatus('Backend error.', 'err');
+          })
+          .miniAppIdeasAdd(APP_TOKEN, ideaSeed, picked);
+      }
+
+      el('idea-get').addEventListener('click', getIdeas);
+      el('topic').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          getIdeas();
+        }
+      });
+      el('idea-more').addEventListener('click', moreIdeas);
+      el('idea-add').addEventListener('click', addSelected);
+    }
+
+    if (VIEW === 'ideas') {
+      el('view-settings').hidden = true;
+      el('view-ideas').hidden = false;
+      if (!APP_TOKEN) {
+        setLive('idea-status', 'Missing token. Open this page from Telegram.', 'err');
+      } else {
+        initIdeas();
+      }
+    } else {
+      initSettings();
+    }
+  </script>
+</body>
+</html>

@@ -1,16 +1,16 @@
 # AI-Assisted Development Record
 
-How AI was used as an engineering assistant during the design of Deal Watch.
+How AI was used as an engineering assistant while designing and building Deal Watch.
 
 AI explored alternatives, challenged assumptions, and surfaced edge cases; all final decisions were made by the project owner.
 
-No implementation code exists yet — this record covers the design phase only.
+This record began in the design phase and now also covers the build. Entries are kept as written; superseded ones carry a short note pointing to what replaced them, rather than being deleted.
 
 ## Ownership
 
 AI acted as reviewer and options-generator throughout.
 
-Every trade-off above — channel, runtime, storage, matching semantics, digest shape, LLM fencing, and secret handling — was decided by the owner against AI-surfaced alternatives.
+Every trade-off in this record — channel, runtime, storage, matching semantics, digest shape, LLM fencing, and secret handling — was decided by the owner against AI-surfaced alternatives.
 
 The rejections are recorded with reasons so future sessions don't relitigate them.
 
@@ -115,13 +115,13 @@ Word-boundary matching was rejected as meaningless for Chinese; regex deferred t
 
 **Decision.**
 
-- Fires only on explicit request (`[Need ideas?]` after at least one seed word, or `/suggest <seed>`).
+- Fires only on explicit request (`[Need ideas?]` after at least one seed word). (A planned `/suggest <seed>` command was never implemented.)
 - Sends only the seed to OpenRouter.
 - Writes nothing until the user picks items.
 
 **Why.**
 
-One call per request (with 24h seed caching).
+One call per request (with 6h seed caching).
 
 Avoids exfiltrating mail content, and keeps a human in the loop so bad suggestions never silently become rules.
 
@@ -167,6 +167,8 @@ So keyword filtering could not safely live inside the Gmail query.
 **Result.** Each finding became a locked constraint or a schema addition before any code was written.
 
 ## 10. Security and secret handling
+
+> Superseded by #40 (T6-i): the in-chat `/setkey`/`/setmodel` entry was replaced by `/setai` (Mini App Settings).
 
 **Problem.** Bot tokens and LLM keys must be usable by the script without ever being visible to the template author or leaking into logs and repos.
 
@@ -517,6 +519,8 @@ Multi-OAuth additionally multiplies runtime against the per-execution and daily 
 
 ## 26. T5-a/b Telegram inbound + Setup implemented
 
+> Note (#40): `/setkey`/`/setmodel`, deferred here to T6, were later replaced by `/setai` (Mini App Settings).
+
 **Problem.** T3/T4 were backend-only; Telegram needed an inbound router plus a one-time Setup/bind flow, without pulling in rule CRUD (T5-c) or interval UI (T5-d).
 
 **Options considered.** One-shot full T5 vs sliced delivery (router + Setup first); conversation state in `CacheService` vs `ScriptProperties`; rule ids via `max+1` vs UUID; transfer flows with or without a confirm step.
@@ -639,6 +643,8 @@ A second incident compounded it: the `deleteWebhook?drop_pending_updates=true` c
 
 ## 33. T5-c/d/e locked through grill (menu, CRUD shape, no reply keyboard)
 
+> Note (#40): the command menu and the `/setkey`/`/setmodel` entries here were later replaced by a single `/setai` (Mini App Settings).
+
 **Problem.** T5-a/b left rule CRUD and interval/status/help undefined, plus the owner asked whether Telegram can avoid typing commands like `/transfer`.
 
 **Options considered.** `setMyCommands` menu vs persistent reply keyboard vs inline-only; add-rule step count; detail button set; keyword validation reuse; unknown-command reply.
@@ -698,3 +704,143 @@ A second incident compounded it: the `deleteWebhook?drop_pending_updates=true` c
 **Why.** One canonical TZ everywhere removes the parse-vs-display-vs-format split at the source; enforcement in `ensureSchema` stops future drift; per-user TZ machinery is overkill for one HK owner.
 
 **Result.** Owner verified live: add/edit a rule → Excel `updated_at` and TG `Updated:` both show the same HK `yyyy-MM-dd HH:mm`. No `CONTEXT.md` change (bug fix, not structural).
+
+## 37. Idea-seed search feedback (placeholder + in-flight guard)
+
+> Superseded by #40 (T6-i): the in-chat idea flow was removed in favour of the Mini App Ideas view.
+
+**Problem.** After `[Need ideas?]` → "What do you want to listen for?", typing a seed leaves the owner waiting several seconds with no Telegram feedback before the chips appear. On a cache miss `handleIdeaSeedConv_` blocks on one synchronous OpenRouter `/chat/completions` call and nothing is shown meanwhile.
+
+**Options considered.** A: `sendChatAction('typing')` (fades after ~5s, no message); B: placeholder message edited into chips/error; C: both; D: mark an `await_idea_processing` state so further text is nudged instead of firing a second LLM call. Time hint: static vs measured (measured needs new state — rejected). Telegram offers no skeleton/progress bar and no way to lock the text input.
+
+**How AI was used.** Codebase check found no `sendChatAction`, no duration tracking, and a synchronous `UrlFetchApp` call in `handleIdeaSeedConv_`. Owner chose B + D, no typing indicator, no `/cancel` button on the wait nudge, and show the model name in the placeholder. AI flagged that `/cancel` cannot abort the in-flight call (`UrlFetchApp` is blocking) and that a tiny webhook race window remains.
+
+**Decision.** `src/Code.gs` only, no new Config constants:
+
+- `sendTelegramToChat_` now returns `messageId` on success via new `extractMessageId_`; existing `{ ok, error }` callers unaffected.
+- `handleIdeaSeedConv_` split: cache hit renders chips directly; cache miss calls new `startIdeaSearch_`, which sets `await_idea_processing`, sends `Searching ideas for "<seed>" with <model>... this can take a few seconds.`, runs the call, then edits the placeholder into chips (success) or the error + `/cancel` keyboard (failure, state restored to `await_idea_seed`). New helpers `carryIdeaFlow_`, `setIdeaPick_`, `buildIdeaSearchingText_`, `editOrSendIdea_`.
+- `doPost` nudges non-command text during `await_idea_processing` with `Searching... please wait a moment.` (no button); `handleIdeaCallback_` answers any in-flight tap with `Searching...` so a stale Back tap cannot corrupt the flow.
+
+**Why.** The placeholder is duration-proof (typing fades at ~5s); the processing state prevents duplicate parallel LLM calls; the model name gives the owner a sense of expected wait without any measurement.
+
+**Result.** Owner verifies live; no new `Logger`/`Runs`/`Log`/`ScriptProperties`, no A typing indicator, no `idea:more` change.
+
+## 38. Cancel an in-flight suggestion search (discard-on-return)
+
+> Superseded by #40 (T6-i): the in-chat idea flow was removed in favour of the Mini App Ideas view.
+
+**Problem.** Follow-up to entry 37: the owner asked whether the OpenRouter request can be cancelled. It cannot be truly aborted, so the question became how `/cancel` should behave while the seed search is in flight.
+
+**Options considered.** True abort (impossible: `UrlFetchApp` is synchronous with no cancel/timeout API, OpenRouter exposes no cancel endpoint, and `stream:true` cannot be interrupted because Apps Script buffers the whole response); async refactor (does not enable abort, only adds complexity); discard-on-return (lightweight, effective from the user's view); leave as-is.
+
+**How AI was used.** AI confirmed the request and its billing cannot be stopped and proposed discard-on-return plus an explicit note in the cancel reply. Owner approved the wording and the `/cancel` hint on the wait nudge.
+
+**Decision.** `src/Code.gs` only:
+
+- `/cancel` command and the `cancel:all` callback read conv before clearing; when `step === 'await_idea_processing'` they reply `Cancelled. The in-flight suggestion request cannot be stopped and may still be billed.` instead of `Cancelled. Nothing changed.`
+- `startIdeaSearch_` re-reads conv after `callOpenRouter_` returns; if it is no longer `await_idea_processing` (cancelled or superseded), it discards the result and edits the placeholder to `Cancelled.`
+- The in-flight text nudge gained `(send /cancel to abort)`.
+
+**Why.** Discard-on-return gives the owner a real cancellation from their point of view without an async rewrite; the note keeps expectations honest about billing, which no code path can avoid.
+
+**Result.** Owner verifies live; known limits documented: the HTTP request and its token cost still occur, and a last-moment race can still deliver chips if the call finishes just before `/cancel` lands.
+
+## 39. Cancel the suggestion search for real (delete the idea message)
+
+> Superseded by #40 (T6-i): the in-chat idea flow was removed in favour of the Mini App Ideas view.
+
+**Problem.** After entry 38 shipped and the owner redeployed, live testing still showed `Cancelled. Nothing changed.` and the chips appearing anyway. Root cause: Telegram delivers updates for the same chat **in series, waiting for a 200** before the next, and the seed handler blocks synchronously on OpenRouter — so `/cancel` either runs after the search completed or reads a conv it cannot see. A synchronous webhook therefore cannot interrupt the call.
+
+**Options considered.** Async refactor (Apps Script has no practical background execution; a minute-granularity trigger would delay every suggestion ~1 min — rejected); abort the HTTP request (impossible); accept and only clean up afterwards; delete the idea message on cancel so nothing lingers.
+
+**How AI was used.** Web search confirmed same-chat webhook updates are delivered sequentially (grammY, telegraf, Telegram.Bot guide). AI proposed the delete-on-cancel design and the seed-prompt button strip; owner approved delete, edit-to-clear-buttons, and keeping the `Nothing changed` reply.
+
+**Decision.** `src/Code.gs` only:
+
+- New pure `ideaSeedPromptText_()`; `handleIdeaStart_` uses it and stores the seed prompt's message id as `promptId`.
+- New `stripIdeaSeedButtons_` clears the seed prompt's inline buttons when a search starts, so no stale `[Back]`/`[Cancel]` can later produce `Session expired`.
+- `carryIdeaFlow_` now carries `promptId` (never `messageId`, so a failed search cannot delete its own error message); `setIdeaPick_` copies `messageId` explicitly.
+- `startIdeaSearch_` stores the placeholder `messageId` and, on a changed conv, **deletes** the placeholder instead of editing it to `Cancelled.`
+- `/cancel` and `cancel:all` delete the stored idea message (`deleteTelegramMessage_`) before clearing conv; `cancel:all` then replies with a fresh message since the button's own message is gone.
+- `buildIdeaSearchingText_` gained ` Send /cancel to abort.`
+
+**Why.** Deleting is race-proof: whether the result rendered before or after `/cancel`, the message is removed, and a late render of a deleted message fails harmlessly.
+
+**Result.** Owner verifies live; residual limit documented in `T6-TestingPlan.md`: under Telegram's serialized delivery the chips may flash before the delete — the HTTP request and its token cost still occur. Runner and manual checklist updated (entry in `test/TestT6.gs`, section 4 in `test/T6-TestingPlan.md`).
+
+## 40. Key/model entry and keyword ideas move to a Telegram Mini App
+
+**Problem.** Two flows had outgrown the chat: `/setkey`+`/setmodel` typed a secret in the clear, paged a 469-model list through 8-item inline keyboards, and the in-chat `[Need ideas?]` flow had grown into a multi-step conv state machine (seed → placeholder → chips → 3 batches → confirm) with several known races. The owner wanted one clean surface for "key + model" and for "give me keyword ideas", while keeping the chat as the driver.
+
+**Options considered.** Keep polishing the inline flows; a Telegram Mini App (Web App) served by the existing bound `doGet`; a separate hosted web app. A hosted app was rejected (extra infra, key custody). Between the two Telegram options the owner chose the Mini App so typing the key happens in a real input, model search becomes a client-side filter, and idea selection becomes toggles — with the chat still owning rule creation.
+
+**How AI was used.** AI mapped the constraints (Apps Script `HtmlService` runs in a `googleusercontent` iframe; page JS cannot read `window.location`, so the token/view must be injected server-side; `web_app` inline buttons work once the bot can send them), proposed token auth via a bot-minted query token bound to the owner chat, and sliced the work into T6-d…T6-j. The owner locked the decisions (single `/setai`, direct `[Need ideas?]` button, dark-only, no Telegram SDK/`initData`, no new `ScriptProperties` keys) and confirmed each slice before the next.
+
+**Decision.** `src/Code.gs` + new `src/MiniApp.html`, no new deployment:
+
+- One Mini App page served by `doGet`, one view per open (`Settings` = `/setai`, `Ideas` = the `[Need ideas?]` button); the bot mints a `CacheService` token (TTL 7200s) bound to the owner chat and re-validates it on every `google.script.run` call.
+- `/setai` replaces `/setkey`+`/setmodel`; Settings sets/replaces (masked) or deletes the key and searches/picks/clears the model (free-only filter, Free/Paid badge, routers hidden, only text-output models).
+- `model_meta` is cached in `CacheService` (best-effort refetch); requests always cap `max_tokens` and send `reasoning:{enabled:false}` only for models known to allow it (mandatory/unknown omit the field to avoid a 400).
+- `[Need ideas?]` is now a direct `web_app` button opening the Ideas view (topic → suggestions → toggle chips, ≤3 batches → "Add selected" hands back to the chat confirm). If the conv expired the app says so instead of creating anything.
+- T6-i removed the superseded inline `/setkey`/`/setmodel` pickers, the `await_key`/`await_model*`/`await_idea_*` conv steps, the `doPost` nudges, and the `/cancel`/`cancel:all` idea special cases (plain cancel again).
+
+**Why.** A Mini App puts secret entry in a proper field, makes search instant, and removes the whole class of button-driven conv races — while reusing the existing `doGet`/`web_app` surface so there is no new backend, no key exfiltration path, and no Telegram SDK dependency.
+
+**Result.** Owner verifies slice-by-slice; T6-d…T6-i done with `TestT6.gs` (pure + token-guard checks) and the rewritten `test/T6-TestingPlan.md`. T6-k (responsive layout for small screens) deferred. `CONTEXT.md` and the file header updated; the original inline `/setkey`/`/setmodel`/chip path is gone.
+
+## 41. T6-k responsive layout for the Mini App
+
+**Problem.** T6-k was deferred from the Mini App build: the page was built desktop-first with fixed 16px gutters, a 14px password field (iOS zooms an input below 16px on focus), and full-bleed rows that stretch on wider screens. It needed to hold up on a small phone inside the Telegram webview.
+
+**Options considered.** A JS viewport measurement (unnecessary); a CSS-only pass with media queries; a framework/reset dependency (rejected — the page is intentionally dependency-free). Owner approved a CSS-only slice.
+
+**How AI was used.** AI reviewed the existing stylesheet, identified the concrete small-screen issues (iOS focus zoom, cramped field rows, unbounded width on large screens), and proposed the minimal set of rules; the owner approved the scope as a task.
+
+**Decision.** `src/MiniApp.html` CSS only:
+
+- `body` gains `-webkit-text-size-adjust: 100%`; the password field moves to 16px so iOS no longer auto-zooms on focus.
+- `@media (max-width: 380px)`: tighter gutters; `.keyfield`/`.searchbar` wrap and their fields go full width with their buttons below; `Add selected`/`More ideas` stack.
+- `@media (min-width: 640px)`: the appbar, panels, list, chips and action rows cap at 640px and centre, so the layout stays readable instead of full-bleed.
+
+**Why.** The app is already responsive-by-structure (`min-width: 0`, `overflow-wrap: anywhere`, wrapping chips, safe-area padding); only the two edges — very narrow and very wide — were unhandled. A CSS-only change keeps the single-file, dependency-free design and changes no behavior.
+
+**Result.** Owner verifies live by resizing / opening on a small phone. `CONTEXT.md` status and build plan updated; manual narrow/wide checks added to `test/T6-TestingPlan.md`.
+
+
+## 42. T6-l Mini App viewport ignored by Apps Script
+
+**Problem.** On iPhone the Mini App rendered tiny, as if in desktop view, even after the T6-k responsive pass. The page already carried `<meta name="viewport" content="width=device-width, ...">` in its `<head>`, so the CSS media queries never triggered on the device.
+
+**Options considered.** Keep the inline meta (rejected — it does nothing); inject the viewport server-side via `HtmlOutput.addMetaTag`; move the page to a non-Apps-Script host so the inline meta applies (rejected — the Mini App depends on `google.script.run`, which only exists when served by Apps Script, and a new host violates the no-extra-infra decision).
+
+**How AI was used.** AI traced the served page back to `serveMiniApp_`/`HtmlService`, found Google's own reference stating *"Meta tags included directly in an Apps Script HTML file are ignored"* with `viewport` among the few names `addMetaTag` allows, and proposed the minimal server-side fix.
+
+**Decision.** `src/Code.gs`:
+- New `MINI_APP_VIEWPORT` constant (`width=device-width, initial-scale=1, viewport-fit=cover`).
+- `serveMiniApp_` and `serveMiniAppError_` now chain `.addMetaTag('viewport', MINI_APP_VIEWPORT)`; `serveMiniAppError_` drops its (ignored) inline meta.
+- `src/MiniApp.html` drops the now-dead inline viewport meta.
+
+**Why.** The root cause was not CSS but the ignored meta tag; `addMetaTag` is the only channel that reaches the served document, and the same value keeps `env(safe-area-inset-*)` working via `viewport-fit=cover`.
+
+**Known limitation.** The Mini App still opens in Telegram's in-app browser (with a URL bar) rather than the full-screen Mini App webview. Leading cause is Apps Script's inherent `/exec` 302 redirect to `script.googleusercontent.com`; it is not controllable from code, and the page cannot move hosts because the backend channel is `google.script.run`.
+
+**Result.** Owner verifies live on iPhone (text size normal; no focus zoom). Risk: Google's 2023 viewport regression (IssueTracker 298287665) would keep the meta ignored — verified live, not in code.
+
+
+## 43. T6-m Mini App blocked by X-Frame-Options on desktop Telegram
+
+**Problem.** Opening `/setai` in Settings on Telegram Desktop for macOS landed on Firefox's `xframe-neterror-page` ("this site will not allow Firefox to display the page in a frame"). The iPhone app opened the same Mini App fine, so it was not a total outage.
+
+**Options considered.** Treat it as a browser/local issue (rejected — a different browser would fail the same way); override the header with `HtmlService.XFrameOptionsMode.ALLOWALL`; move the page to a non-Apps-Script host (rejected, same reason as #42 — the backend channel is `google.script.run`).
+
+**How AI was used.** AI mapped the symptom: `xframe-neterror-page` is the browser's X-Frame-Options refusal page, Apps Script serves HtmlService with the default `X-Frame-Options` and the code never overrides it, and desktop/web Telegram clients load the Mini App inside a frame while the mobile app loads it as the top-level document. That difference explains why only iPhone worked. AI proposed the one-line-per-handler override and flagged that it drops clickjacking protection (bounded here by the minted token + owner-chat check).
+
+**Decision.** `src/Code.gs`:
+- `serveMiniApp_` and `serveMiniAppError_` chain `.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)` on the returned `HtmlOutput`.
+- Comment added at each call site stating why (desktop/web framing) and that the token is the guard.
+
+**Why.** The root cause is the host's default anti-framing header meeting a desktop client that frames the content; the header is the only controllable part, and the token already provides the auth. No change to auth, texts, or `MiniApp.html`.
+
+**Result.** Owner re-deploys (new version, since `doGet` changed) and verifies live on macOS Telegram Desktop (no `xframe-neterror-page`) plus an iPhone regression check. Related to the #42 known limitation (still opens in the in-app browser rather than the full-screen webview) but distinct: that is the `/exec` 302, this was the frame header.
+
+
