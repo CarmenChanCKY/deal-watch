@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Usage — Deal Watch</title>
+  <meta name="description"
+    content="How to use Deal Watch: commands, adding rules, keyword syntax, check interval, status and errors, keyword ideas, and maintenance.">
+  <meta property="og:title" content="Usage — Deal Watch">
+  <meta property="og:description"
+    content="Commands, rules, keywords, interval, status, and the optional keyword-idea helper.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://carmenchancky.github.io/deal-watch/usage.html">
+  <meta property="og:image" content="https://carmenchancky.github.io/deal-watch/assets/img/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://carmenchancky.github.io/deal-watch/assets/img/og.png">
+  <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/css/style.css">
+</head>
+
+<body>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">Deal Watch</a>
+      <nav id="site-nav" class="site-nav" aria-label="Main">
+        <a href="index.html">Home</a>
+        <a href="setup.html">Setup</a>
+        <a href="usage.html" aria-current="page">Usage</a>
+        <a href="faq.html">FAQ</a>
+      </nav>
+      <div class="header-actions">
+        <a class="gh" target="_blank" rel="noopener" href="https://github.com/CarmenChanCKY/deal-watch"
+          aria-label="GitHub repository">
+          <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+        </a>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav"
+          aria-label="Toggle menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            aria-hidden="true">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+
+      <h1>Usage</h1>
+      <p class="lead">Everything happens in your Telegram chat with your bot. It is button-first: you tap, you rarely
+        type.</p>
+
+      <h2>Commands</h2>
+      <p>Open the menu button next to the message box to see these, or type them.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Command</th>
+            <th>What it does</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>/list</code></td>
+            <td>Show your rules, 10 per page. Tap a rule to enable, disable, edit, or delete it.</td>
+          </tr>
+          <tr>
+            <td><code>/add</code></td>
+            <td>Add a rule: sender, then keywords, then confirm.</td>
+          </tr>
+          <tr>
+            <td><code>/interval</code></td>
+            <td>Change how often Gmail is checked.</td>
+          </tr>
+          <tr>
+            <td><code>/status</code></td>
+            <td>Show the interval, rule count, last check, and last error.</td>
+          </tr>
+          <tr>
+            <td><code>/help</code></td>
+            <td>Show the command list.</td>
+          </tr>
+          <tr>
+            <td><code>/setai</code></td>
+            <td>Open Settings for the optional keyword-idea helper (OpenRouter key and model).</td>
+          </tr>
+          <tr>
+            <td><code>/transfer</code></td>
+            <td>Move the watcher to the Telegram account you are sending from.</td>
+          </tr>
+          <tr>
+            <td><code>/connect</code></td>
+            <td>Replace the bot token after you generate a new one in BotFather.</td>
+          </tr>
+          <tr>
+            <td><code>/start &lt;token&gt;</code></td>
+            <td>Bind your Telegram account. One-time, from the Setup link.</td>
+          </tr>
+          <tr>
+            <td><code>/cancel</code></td>
+            <td>Abort the current step of a multi-step flow.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Adding a rule</h2>
+      <p>A rule is one sender plus a set of keywords. <code>/add</code> asks for them one at a time.</p>
+      <ol>
+        <li>Send <code>/add</code>, then send the sender.</li>
+        <li>Send the keywords, comma-separated.</li>
+        <li>Confirm. The rule is created, enabled, and starts matching on the next check.</li>
+      </ol>
+      <p>On the keywords step you may also see a <strong>[Use last keywords]</strong> button that copies the keywords
+        from your most recent rule, and a <strong>[Need ideas?]</strong> button if the idea helper is set up.</p>
+      <figure class="shot">
+        <img src="assets/img/usage-02-add-sender.png" alt="Add rule prompting for a sender" width="390" height="844">
+        <figcaption>Step 1: send a domain or a full email address.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="assets/img/usage-03-add-keywords.png" alt="Add rule prompting for keywords" width="390" height="844">
+        <figcaption>Step 2: send keywords, comma-separated.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="assets/img/usage-04-confirm.png" alt="Confirming a new rule" width="390" height="844">
+        <figcaption>Step 3: confirm. Cancel any time with <code>/cancel</code>.</figcaption>
+      </figure>
+
+      <h2>Senders</h2>
+      <ul>
+        <li>A <strong>domain</strong> such as <code>xxx.com</code> matches any address at that domain.</li>
+        <li>A <strong>full email</strong> such as <code>abc@xxx.com</code> matches only that address.</li>
+        <li>A <code>+tag</code> is ignored, so mail to <code>abc+sale@xxx.com</code> matches <code>abc@xxx.com</code>.
+        </li>
+        <li>Matching is case-insensitive.</li>
+      </ul>
+
+      <h2>Keywords</h2>
+      <ul>
+        <li>Comma-separated keyword means OR. <code>air, 5折, sale</code> matches any one of them.</li>
+        <li>Quotes match an exact phrase: <code>"free shipping"</code>.</li>
+        <li>Case is ignored, and full-width and half-width characters are treated the same.</li>
+        <li>A keyword matches if it appears anywhere in the email body. The subject is shown, but matching uses the
+          body.</li>
+      </ul>
+
+      <h2>Limits</h2>
+      <ul>
+        <li>Up to 30 enabled rules.</li>
+        <li><code>/list</code> shows 10 rules per page.</li>
+        <li>Adding a sender that already has a rule opens that rule for editing instead of creating a duplicate.</li>
+      </ul>
+      <figure class="shot">
+        <img src="assets/img/usage-01-list.png" alt="Rule list with per-rule buttons" width="390" height="844">
+        <figcaption>Tap a rule to open it: enable, disable, edit, or delete.</figcaption>
+      </figure>
+
+      <h2>Check interval</h2>
+      <p>Use <code>/interval</code> and pick from the buttons. The options are 15, 30, and 60 minutes, then 2, 6, and 12
+        hours. The default is 15 minutes.</p>
+      <figure class="shot">
+        <img src="assets/img/usage-05-interval.png" alt="Interval options with the current one marked" width="390"
+          height="844">
+        <figcaption>The current interval is marked.</figcaption>
+      </figure>
+
+      <h2>Status and errors</h2>
+      <p><code>/status</code> shows the interval, how many rules you have, when the last check ran, and the last error
+        if there was one.</p>
+      <ul>
+        <li>If a check finds nothing, you get no message.</li>
+        <li>If a send fails, the error is included in your next digest so you are not left guessing.</li>
+        <li>After three consecutive send failures, retries pause until a send succeeds again.</li>
+      </ul>
+      <figure class="shot">
+        <img src="assets/img/usage-06-status.png" alt="Status output with interval, rule count, and last run"
+          width="390" height="844">
+        <figcaption>One screen answers "is it working?".</figcaption>
+      </figure>
+
+      <h2>The digest</h2>
+      <p>You get one message per check. Each email thread appears once, with the subject, the date, a link straight to
+        the thread, and the keywords that matched.</p>
+      <ul>
+        <li>There are no caps and no quiet hours. Mute your phone if you want a break.</li>
+        <li>Threads with nothing matched are not listed, and a check with no matches sends nothing.</li>
+      </ul>
+      <figure class="shot">
+        <img src="assets/img/usage-07-digest.png" alt="A digest message with thread links" width="390" height="844">
+        <figcaption>One digest, grouped per thread, with links.</figcaption>
+      </figure>
+
+      <h2>Keyword ideas (optional)</h2>
+      <p>Deal Watch can suggest keywords using OpenRouter, an AI provider. This is off until you set it up, and calls
+        are billed to your own OpenRouter account.</p>
+      <ol>
+        <li>Send <code>/setai</code> to open Settings.</li>
+        <li>Enter your OpenRouter API key and pick a model. The key is shown masked and can be deleted at any time.</li>
+        <li>While adding or editing a rule, tap <strong>[Need ideas?]</strong>, type a topic, and tap the keywords you
+          want. They are handed back to the chat for you to confirm.</li>
+      </ol>
+      <p>Suggestions only ever use the topic you type. They never read your email, and they never change your rules on
+        their own.</p>
+      <figure class="shot">
+        <img src="assets/img/usage-08-setai-settings.png" alt="Settings for the OpenRouter key and model" width="390" height="844">
+        <figcaption>Settings: OpenRouter key and model, both optional and removable.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="assets/img/usage-09-ideas.png" alt="Keyword idea suggestions as tappable chips" width="390" height="844">
+        <figcaption>Type a topic, tap the keywords, then confirm back in the chat.</figcaption>
+      </figure>
+
+      <h2>Maintenance</h2>
+      <ul>
+        <li><strong>New phone:</strong> nothing to do. Notifications follow your Telegram account.</li>
+        <li><strong>New Telegram account:</strong> send <code>/transfer</code> from the new account and confirm.</li>
+        <li><strong>New bot token:</strong> generate one in BotFather, then send <code>/connect</code> and paste it. The
+          message is deleted right after.</li>
+        <li>Your rules and history survive all of the above, because they live in your Sheet, not in Telegram.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Something not working?</strong>
+        <p>See the <a href="faq.html">FAQ</a>.</p>
+      </div>
+
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>Deal Watch · <a target="_blank" rel="noopener" href="https://github.com/CarmenChanCKY/deal-watch">Source on
+          GitHub</a> · <a target="_blank" rel="noopener"
+          href="https://github.com/CarmenChanCKY/deal-watch/blob/main/LICENSE">MIT</a></p>
+      <p class="copyright">&copy; <span data-year>2026</span> Carmen Chan</p>
+    </div>
+  </footer>
+
+  <script src="assets/js/site.js"></script>
+</body>
+
+</html>

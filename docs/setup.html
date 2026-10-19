@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup — Deal Watch</title>
+  <meta name="description"
+    content="Step-by-step setup for Deal Watch: create a Telegram bot, copy the Google Sheet template, deploy the Web App, and bind your Telegram account.">
+  <meta property="og:title" content="Setup — Deal Watch">
+  <meta property="og:description"
+    content="Step-by-step setup: Telegram bot, Google Sheet template, Web App deploy, Telegram binding.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://carmenchancky.github.io/deal-watch/setup.html">
+  <meta property="og:image" content="https://carmenchancky.github.io/deal-watch/assets/img/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://carmenchancky.github.io/deal-watch/assets/img/og.png">
+  <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/css/style.css">
+</head>
+
+<body>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">Deal Watch</a>
+      <nav id="site-nav" class="site-nav" aria-label="Main">
+        <a href="index.html">Home</a>
+        <a href="setup.html" aria-current="page">Setup</a>
+        <a href="usage.html">Usage</a>
+        <a href="faq.html">FAQ</a>
+      </nav>
+      <div class="header-actions">
+        <a class="gh" target="_blank" rel="noopener" href="https://github.com/CarmenChanCKY/deal-watch"
+          aria-label="GitHub repository">
+          <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+        </a>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav"
+          aria-label="Toggle menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            aria-hidden="true">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+
+      <h1>Setup</h1>
+      <p class="lead">About 15 minutes. You will create a Telegram bot, copy the Google Sheet template, deploy the Web
+        App, and bind your Telegram account.</p>
+
+      <div class="callout">
+        <strong>Before you start</strong>
+        <ol>
+          <li>A Google account with Gmail.</li>
+          <li>Your Telegram account.</li>
+          <li>The browser you will use for the Google steps (desktop is easiest).</li>
+        </ol>
+        <p>You will do everything else inside your own account.</p>
+      </div>
+
+      <section class="step">
+        <h2>1. Create your bot in BotFather</h2>
+        <p>BotFather is Telegram's official bot for creating bots.</p>
+        <ol>
+          <li>In Telegram, search for <strong>@BotFather</strong> and open it.</li>
+          <li>Send the <code>/start</code> command. Then the <code>/newbot</code> command.</li>
+          <li>Give the bot a name, then a username. The username must end in <code>bot</code>, for example
+            <code>my_deal_watch_bot</code>.
+          </li>
+          <li id="tg-bot-api-token">BotFather replies with an HTTP API token. Copy it and keep it private — it is the
+            key to your bot.</li>
+        </ol>
+        <figure class="shot">
+          <img src="assets/img/setup-01-botfather-newbot.png" alt="BotFather answering with a new bot token" width="390"
+            height="844">
+          <figcaption>BotFather replies with the token for your new bot. Keep it private.</figcaption>
+        </figure>
+      </section>
+
+      <section class="step">
+        <h2>2. Copy the Sheet template</h2>
+        <p>Open the template in Google Sheets and make your own copy. Everything runs from this copy, in your own Google
+          account.</p>
+        <ol>
+          <li>Open <a target="_blank" rel="noopener"
+              href="https://docs.google.com/spreadsheets/d/1pNb1TCxCix7ublIMJN-R3xNJn_6sjlU_rzRanuQFDno/edit?usp=sharing">the
+              Deal Watch template</a> in Google Sheets.</li>
+          <li>In the Sheet, choose <strong>File &gt; Make a copy</strong>, then save it to your own Google Drive.</li>
+          <li>Open your copy. It is a normal Google Sheet, with Deal Watch attached to it.</li>
+        </ol>
+        <p>You do not need edit access to the template — just make a copy.</p>
+      </section>
+
+      <section class="step">
+        <h2>3. Deploy the Web App</h2>
+        <p>Telegram needs a public URL to send your button taps to. You create that once, from the Sheet's script
+          editor.</p>
+        <ol>
+          <li>In your copied Sheet, open <strong>Extensions &gt; Apps Script</strong>.</li>
+          <li>Click <strong>Deploy &gt; New deployment</strong>.</li>
+          <li>Click the gear next to "Select type" and choose <strong>Web app</strong>.</li>
+          <li>Set <strong>Execute as</strong> to <strong>Me</strong>.</li>
+          <li>Set <strong>Who has access</strong> to <strong>Anyone</strong>.</li>
+          <figure class="shot wide">
+            <img src="assets/img/setup-04-deploy-new-deployment.png"
+              alt="Apps Script New deployment settings for a Web app" width="1200" height="675">
+            <figcaption>Web app, executed as you, accessible to anyone.</figcaption>
+          </figure>
+          <li>Click <strong>Deploy</strong>.</li>
+          <div class="callout warn" id="unverified-app">
+            <strong>"Google hasn't verified this app"</strong>
+            <p>This warning is expected. It appears because the script is your own private copy, not an app published to
+              the Google Store. To continue:</p>
+
+            <ol>
+              <li>Click <strong>Advanced</strong></li>
+              <li><strong>Go to (your project name) (unsafe)</strong></li>
+              <li>Select all permission</li>
+              <li>Click <strong>Continue</strong></li>
+            </ol>
+            <p>You are granting your own script access to your own Gmail and Sheet.</p>
+
+            <figure class="shot wide">
+              <img src="assets/img/setup-02-oauth-warning.png"
+                alt="Google unverified app warning with the Advanced link" width="1200" height="675">
+              <figcaption>Click Advanced, then Go to &lt;your project name>.</figcaption>
+            </figure>
+            <figure class="shot">
+              <img src="assets/img/setup-03-permission-warning.png" alt="Google request permission" width="1200"
+                height="675">
+              <figcaption>Select all permission, then Continue.</figcaption>
+            </figure>
+          </div>
+          <li id="web-app-url">Copy the <strong>Web app URL</strong>. It must end with <code>/exec</code>, not
+            <code>/dev</code>.
+          </li>
+
+          <figure class="shot wide">
+            <img src="assets/img/setup-05-deploy-exec-url.png" alt="The Web app URL ending in /exec" width="1200"
+              height="675">
+            <figcaption>Copy the URL that ends with <code>/exec</code>. The <code>/dev</code> URL will not work with
+              Telegram.</figcaption>
+          </figure>
+        </ol>
+      </section>
+
+      <section class="step">
+        <h2>4. Run Deal Watch &gt; Setup</h2>
+        <p>Back in your Sheet, the <strong>Deal Watch</strong> menu appears at the top. If you do not see it, reload the
+          Sheet.</p>
+        <ol>
+          <li id="deal-watch-setup">Click <strong>Deal Watch &gt; Setup</strong>.</li>
+          <figure class="shot wide">
+            <img src="assets/img/setup-06-deal-watch-setup-btn.png" alt="Deal Watch > Setup button" width="1200"
+              height="675">
+          </figure>
+          <li>When prompted, paste your <strong><a href="#tg-bot-api-token">bot token</a></strong> from Step 1.</li>
+          <figure class="shot">
+            <img src="assets/img/setup-07-ask-bot-token.png" alt="Setup prompting for the bot token" width="1200"
+              height="675">
+          </figure>
+          <li>When prompted again, paste your <strong><a href="#web-app-url">Web app URL</a></strong> from Step 3.</li>
+          <figure class="shot">
+            <img src="assets/img/setup-08-ask-web-app-url.png" alt="Setup prompting for the Web app URL" width="1200"
+              height="675">
+          </figure>
+        </ol>
+      </section>
+
+      <section class="step">
+        <h2>5. Bind your Telegram account</h2>
+        <p>When Setup finishes, it shows a one-time link. This is the final step, and the only part done in Telegram.
+        </p>
+        <ol>
+          <li>Open the link Setup shows, or send the suggested <code>/start &lt;token&gt;</code> message to your bot.
+          </li>
+          <li>Your bot replies to confirm. From now on it listens only to your Telegram account.</li>
+        </ol>
+        <figure class="shot">
+          <img src="assets/img/setup-09-bind-link.png" alt="Setup showing the one-time Telegram bind link" width="1200"
+            height="675">
+          <figcaption>Open the bind link, or send <code>/start &lt;token&gt;</code> to your bot.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="assets/img/setup-10-start-bound.png" alt="Telegram showing the bot connected" width="390"
+            height="844">
+          <figcaption>The bot confirms you are connected.</figcaption>
+        </figure>
+      </section>
+
+      <section class="step">
+        <h2>6. Test it</h2>
+        <ol>
+          <li>Send <code>/add</code> to your bot and add a rule for a sender you control (or a sender that emails you
+            often).</li>
+          <li>Send a test email to yourself from that sender containing one of your keywords.</li>
+          <li>Wait for the next check. The default interval is 15 minutes.</li>
+          <li>You should receive one digest message. Nothing to report means no message.</li>
+        </ol>
+        <p>See <a href="usage.html">Usage</a> for the full command list and everyday tips.</p>
+      </section>
+
+      <h2>Running Setup again</h2>
+      <p>Setup is safe to re-run:</p>
+      <ul>
+        <li>Before you are bound, re-running <strong><a href="#deal-watch-setup">Deal Watch &gt; Setup</a></strong>
+          shows the same bind link. No new link is created.</li>
+        <li>After you are bound, re-running <strong><a href="#deal-watch-setup">Deal Watch &gt; Setup</a></strong>
+          reports "Already set up" and changes nothing. Your rules and history are
+          kept.</li>
+        <li>New Telegram account: use <code>/transfer</code> in the chat. New bot token: use <code>/connect</code>.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Stuck?</strong>
+        <p>See the <a href="faq.html">FAQ</a> for the common setup problems and what they mean.</p>
+      </div>
+
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>Deal Watch · <a target="_blank" rel="noopener" href="https://github.com/CarmenChanCKY/deal-watch">Source on
+          GitHub</a> · <a target="_blank" rel="noopener"
+          href="https://github.com/CarmenChanCKY/deal-watch/blob/main/LICENSE">MIT</a></p>
+      <p class="copyright">&copy; <span data-year>2026</span> Carmen Chan</p>
+    </div>
+  </footer>
+
+  <script src="assets/js/site.js"></script>
+</body>
+
+</html>

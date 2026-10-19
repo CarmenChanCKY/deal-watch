@@ -2635,7 +2635,7 @@ function onOpen() {
     SpreadsheetApp.getUi()
       .createMenu('Deal Watch')
       .addItem('Setup', 'runSheetSetup')
-      .addItem('Send Mini App test', 'sendMiniAppTest')
+      // .addItem('Send Mini App test', 'sendMiniAppTest')
       .addToUi();
   } catch (e) {
     // Menu creation is best-effort (e.g. headless executions).

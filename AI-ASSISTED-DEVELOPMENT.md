@@ -844,3 +844,49 @@ A second incident compounded it: the `deleteWebhook?drop_pending_updates=true` c
 **Result.** Owner re-deploys (new version, since `doGet` changed) and verifies live on macOS Telegram Desktop (no `xframe-neterror-page`) plus an iPhone regression check. Related to the #42 known limitation (still opens in the in-app browser rather than the full-screen webview) but distinct: that is the `/exec` 302, this was the frame header.
 
 
+## 44. T7 static site and README
+
+**Problem.** T7 needed a public place to explain what Deal Watch is and how a non-technical person installs and uses it, plus a minimal README. `docs/` did not exist and `README.md` was empty.
+
+**Options considered.** A video walkthrough (rejected — no editing, and every UI change forces a reshoot); a single long page (rejected — setup plus usage plus FAQ is too long for one scroll); a multi-page vanilla site on GitHub Pages; screenshots vs text-only for the Google steps.
+
+**How AI was used.** AI ran a structured interview to pin down scope before writing: page structure, language, media strategy, screenshot sourcing, hosting constraints, reader level, and stack limits. AI then verified the real command set, button labels, limits, and Setup prompt order against `src/Code.gs` so the copy matches the product, and built the site.
+
+**Decision.** A four-page static site under `docs/`, served by GitHub Pages from `main` (English at the root, with `/zh-Hant/` reserved for a future Chinese mirror so no refactor is needed later):
+- `index.html` (what it does, a four-step "how it works", prerequisites), `setup.html`, `usage.html`, `faq.html`.
+- Vanilla HTML/CSS/JS, no build, no framework, no CDN, system fonts, light theme.
+- One shared `assets/css/style.css` and a small `assets/js/site.js` (copy-to-clipboard only).
+- Screenshots are deferred: every `<figure>` uses a single `assets/img/placeholder.svg` with its own `alt` and caption, and the intended filename in a comment, so adding a real image is a one-attribute change.
+- `{{COPY_LINK}}`, `{{BOT_USERNAME}}`, `{{REPO_URL}}`, `{{SITE_URL}}` remain as greppable placeholders until the owner supplies real values.
+
+**Why.** Static files need no build step and host for free on GitHub Pages; multi-page keeps each task (install, use, troubleshoot) readable; images plus text can be searched and printed, unlike video; placeholders let the structure land now while the owner captures real screenshots later.
+
+**Result.** Owner reviews the pages locally and, after pushing, enables Pages (Settings > Pages > `main` + `/docs`) and turns the repository public. Screenshots to capture and the placeholder tokens to replace are listed in the T7 handoff.
+
+**Coding-style note.** Content decisions here live in `docs/` (HTML/CSS/JS), not in `src/Code.gs`; the `AGENTS.md` `.gs` style rules and the `CONTEXT.md` locked decisions are unchanged.
+
+
+## 45. T7 second pass — polish, RWD navigation, FAQ usability, brand assets
+
+**Problem.** After the first pass the owner reviewed the site and raised a batch of fixes: a wrapping bug in the Setup warning box, a requested 2x2 feature grid, a hamburger on small screens, a footer copyright (and whether AI-written work can carry one), an ordered list for the Setup prerequisites, a clickable FAQ table of contents, weak visual separation between FAQ questions and answers, and a share/hero thumbnail.
+
+**Options considered.** Hamburger via a CSS-only checkbox/`:target` hack vs a small JS toggle (chose JS for `aria-expanded`/Esc/outside-click); FAQ as `<details>` accordions vs always-visible cards (chose cards — accordions hide content from Ctrl+F and crawlers); thumbnail as SVG vs PNG (social platforms need PNG); rasterizer options (ImageMagick `magick`, `qlmanage`, headless Chrome).
+
+**How AI was used.** AI found the actual bug behind the "broken sentences": `style.css` had `.callout strong { display: block }`, so every `<strong>` inside a callout — including the three inline `Advanced` / `Go to …` / `Allow` labels — rendered on its own line. AI scoped that rule to the callout's title only. AI also checked available rasterizers and found ImageMagick could not load a font and `qlmanage` padded to a square, so it used headless Chrome to screenshot the SVG at exactly 1200x630, then reviewed the rendered PNG and fixed a text/card overlap.
+
+**Decision.**
+- `docs/assets/css/style.css`: callout title-only `display:block`; `.cards` to a 2x2 grid (1 column <=560px); `.nav-toggle` + collapse `<=640px`; two-column hero; FAQ card + `qa-icon` + `.toc` styles; `.qa`/heading `scroll-margin-top`.
+- `docs/assets/js/site.js`: mobile nav toggle (`aria-expanded`, Esc, outside-click, resize reset) alongside the existing copy-to-clipboard.
+- All four pages: header becomes `[brand] … [GitHub] [hamburger]` (hamburger right-most; GitHub icon stays visible), footer gains `© 2026 Carmen Chan` and an MIT link, and `<head>` gains `og:image`/`og:image:width`/`og:image:height`/`og:url` + `twitter:card`.
+- `docs/index.html`: hero is a two-column grid whose image reuses the Usage digest screenshot (placeholder until captured); what-it-does cards are 2x2.
+- `docs/setup.html`: prerequisites become an ordered list.
+- `docs/faq.html`: a table of contents with eight anchors, and each Q becomes a bordered card with an accent question icon and a divider before the answer.
+- New: `LICENSE` (MIT, `Copyright (c) 2026 Carmen Chan`), `docs/assets/img/og.svg` and its rendered `og.png` (1200x630).
+
+**Why.** A JS toggle is the only way to get a real, accessible hamburger; cards keep the FAQ searchable; an SVG source plus a PNG render keeps the social card editable without design tools; scoping the callout rule fixes the reported wrap without changing any copy.
+
+**Copyright note.** AI is not an author in copyright terms; the human who directed the work holds it, so the footer credits `Carmen Chan`. The owner chose MIT (permissive; suits the per-copy distribution model). The repo gains a `LICENSE` file.
+
+**Result.** Owner reviews locally and, after pushing, enables Pages. `CONTEXT.md` and the T7 entry updated.
+
+

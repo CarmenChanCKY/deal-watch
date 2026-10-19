@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAQ — Deal Watch</title>
+  <meta name="description"
+    content="Deal Watch FAQ: the Google unverified-app warning, webhook errors, missing notifications, the Mini App, privacy, send failures, and how to stop.">
+  <meta property="og:title" content="FAQ — Deal Watch">
+  <meta property="og:description"
+    content="Common questions about setup, notifications, privacy, and stopping Deal Watch.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://carmenchancky.github.io/deal-watch/faq.html">
+  <meta property="og:image" content="https://carmenchancky.github.io/deal-watch/assets/img/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://carmenchancky.github.io/deal-watch/assets/img/og.png">
+  <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/css/style.css">
+</head>
+
+<body>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">Deal Watch</a>
+      <nav id="site-nav" class="site-nav" aria-label="Main">
+        <a href="index.html">Home</a>
+        <a href="setup.html">Setup</a>
+        <a href="usage.html">Usage</a>
+        <a href="faq.html" aria-current="page">FAQ</a>
+      </nav>
+      <div class="header-actions">
+        <a class="gh" target="_blank" rel="noopener" href="https://github.com/CarmenChanCKY/deal-watch"
+          aria-label="GitHub repository">
+          <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+        </a>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav"
+          aria-label="Toggle menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            aria-hidden="true">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+
+      <h1>FAQ</h1>
+      <p class="lead">The questions that come up most, answered plainly.</p>
+
+      <nav class="toc" aria-label="On this page">
+        <h2>On this page</h2>
+        <ol>
+          <li><a href="#faq-unverified">Is "this app isn't verified" safe?</a></li>
+          <li><a href="#faq-webhook">Buttons do nothing, or a webhook / 401 error</a></li>
+          <li><a href="#faq-no-notify">A rule is set up but I get no notifications</a></li>
+          <li><a href="#faq-miniapp">Settings or Ideas will not open</a></li>
+          <li><a href="#faq-too-many">I get too many notifications</a></li>
+          <li><a href="#faq-privacy">Does it read all my email? Where are my keys?</a></li>
+          <li><a href="#faq-failures">What does "three consecutive send failures" mean?</a></li>
+          <li><a href="#faq-stop">How do I stop or delete Deal Watch?</a></li>
+        </ol>
+      </nav>
+
+      <div class="qa" id="faq-unverified">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>Google says "this app isn't verified". Is it safe to continue?</span>
+        </h3>
+        <p>Yes. That warning appears because the script is your own private copy, and Google has no public listing to
+          verify. You are not installing someone else's app; you are granting your own script access to your own Gmail
+          and Sheet. Click <strong>Advanced</strong>, then <strong>Go to (your project) (unsafe)</strong>, then
+          <strong>Allow</strong>. See <a href="setup.html">Setup</a> step 2.</p>
+      </div>
+
+      <div class="qa" id="faq-webhook">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>Telegram buttons do nothing, or I see a webhook / 401 error</span>
+        </h3>
+        <p>The Web App URL almost certainly ends with <code>/dev</code> instead of <code>/exec</code>. Telegram cannot
+          log in to <code>/dev</code>, so it gets rejected. Copy the URL from <strong>Deploy &gt; Manage
+            deployments</strong> (not the test URL), then re-run <strong>Deal Watch &gt; Setup</strong> and paste it.
+          Setup refuses a <code>/dev</code> URL, so you will know immediately. If you need to replace a URL that was
+          already stored, clear the <code>webapp_url</code> row in Script Properties and run Setup again.</p>
+      </div>
+
+      <div class="qa" id="faq-no-notify">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>I set up a rule but I get no notifications</span>
+        </h3>
+        <p>Check these in order:</p>
+        <ul>
+          <li>The rule is enabled (open <code>/list</code> and tap the rule).</li>
+          <li>The sender matches the email: a domain rule uses the part after the <code>@</code>, an email rule must
+            match exactly.</li>
+          <li>A keyword really appears in the email body, not just the subject.</li>
+          <li>Enough time has passed. The default interval is 15 minutes, and a check with no matches sends nothing.
+          </li>
+          <li><code>/status</code> shows the last check time and any error.</li>
+        </ul>
+      </div>
+
+      <div class="qa" id="faq-miniapp">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>Settings or Ideas will not open</span>
+        </h3>
+        <p>The Mini App opens from a button the bot sends, and that link is short-lived. If it expired, send
+          <code>/setai</code> again for a fresh button. It also only opens for the bound owner account, so open it on
+          your own Telegram account, not a shared device signed in as someone else.</p>
+      </div>
+
+      <div class="qa" id="faq-too-many">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>I get too many notifications</span>
+        </h3>
+        <p>Narrow your rules. Use full email addresses instead of whole domains, and choose more specific keywords.
+          Disable a rule you no longer need from <code>/list</code> instead of deleting it, so you can switch it back on
+          later. Deal Watch has no quiet hours by design; mute the chat when you want a break.</p>
+      </div>
+
+      <div class="qa" id="faq-privacy">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>Does it read all my email? Where are my keys?</span>
+        </h3>
+        <p>Deal Watch searches only for mail from the senders you configured, using Gmail's own search. It reads the
+          body of those candidates to check for keywords. It does not scan your whole inbox.</p>
+        <p>Your bot token, and your OpenRouter key if you set one up, live in your own Google account's script
+          properties. They are never shown in full, never written to the Sheet, and never sent anywhere except to
+          Telegram and OpenRouter, which is how notifications and ideas work. Each person runs their own copy, so nobody
+          else has access to your keys.</p>
+      </div>
+
+      <div class="qa" id="faq-failures">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>What does "three consecutive send failures" mean?</span>
+        </h3>
+        <p>If Telegram rejects three digest sends in a row, Deal Watch stops retrying so it does not spam failures. It
+          keeps checking, and resumes sending once a send succeeds. The last error is always visible via
+          <code>/status</code>. A common cause is a rotated or revoked bot token; fix it with <code>/connect</code>.</p>
+      </div>
+
+      <div class="qa" id="faq-stop">
+        <h3>
+          <svg class="qa-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M9.2 9.3a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.1 1-1.1 1.7v.3" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" />
+            <circle cx="12" cy="17" r="1.2" fill="currentColor" />
+          </svg>
+          <span>How do I stop or delete Deal Watch?</span>
+        </h3>
+        <p>To stop temporarily, disable all rules from <code>/list</code>, or delete the time-based trigger in the
+          script's <strong>Triggers</strong> screen. To remove it completely, delete the Google Sheet copy you made (its
+          script goes with it) and delete your bot in BotFather with <code>/deletebot</code>. Nothing else is left
+          behind.</p>
+      </div>
+
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>Deal Watch · <a target="_blank" rel="noopener" href="https://github.com/CarmenChanCKY/deal-watch">Source on
+          GitHub</a> · <a target="_blank" rel="noopener"
+          href="https://github.com/CarmenChanCKY/deal-watch/blob/main/LICENSE">MIT</a></p>
+      <p class="copyright">&copy; <span data-year>2026</span> Carmen Chan</p>
+    </div>
+  </footer>
+
+  <script src="assets/js/site.js"></script>
+</body>
+
+</html>

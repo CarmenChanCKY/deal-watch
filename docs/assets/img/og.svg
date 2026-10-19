@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Deal Watch — Telegram alerts for Gmail promotion emails">
+  <rect width="1200" height="630" fill="#ffffff"/>
+  <rect x="0" y="0" width="14" height="630" fill="#2563eb"/>
+
+  <text x="96" y="250" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="82" font-weight="700" fill="#1f2933">Deal Watch</text>
+  <text x="96" y="316" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="31" fill="#52606d">Telegram alerts for Gmail promos</text>
+  <text x="96" y="370" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="24" fill="#7b8794">Senders plus keywords. One digest per check.</text>
+
+  <rect x="96" y="424" width="300" height="3" fill="#e4e7eb"/>
+  <text x="96" y="486" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="24" fill="#52606d">Runs in your own Google account</text>
+
+  <rect x="742" y="86" width="374" height="458" rx="30" fill="#f7f9fc" stroke="#e4e7eb" stroke-width="2"/>
+  <rect x="742" y="86" width="374" height="52" rx="30" fill="#eef2f7"/>
+  <rect x="742" y="118" width="374" height="20" fill="#eef2f7"/>
+  <circle cx="778" cy="112" r="7" fill="#cbd2d9"/>
+  <text x="900" y="120" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#52606d" text-anchor="middle">Telegram</text>
+
+  <rect x="776" y="176" width="306" height="150" rx="16" fill="#ffffff" stroke="#e4e7eb" stroke-width="2"/>
+  <rect x="776" y="176" width="6" height="150" rx="3" fill="#2563eb"/>
+  <text x="806" y="214" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="19" fill="#7b8794">nike.com</text>
+  <text x="806" y="254" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#1f2933">Air Max, 50% off</text>
+  <rect x="806" y="276" width="96" height="34" rx="17" fill="#e8effc"/>
+  <text x="854" y="299" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="18" fill="#2563eb" text-anchor="middle">air, 5折</text>
+
+  <rect x="776" y="348" width="306" height="118" rx="16" fill="#2563eb"/>
+  <text x="806" y="392" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#ffffff">Deal Watch</text>
+  <text x="806" y="428" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="19" fill="#d7e3fb">2 new matches</text>
+
+  <path d="M1040 500 l38 -18 l-14 34 l-9 -8 z" fill="#2563eb"/>
+  <path d="M1078 482 l-30 24" stroke="#ffffff" stroke-width="2" fill="none"/>
+</svg>

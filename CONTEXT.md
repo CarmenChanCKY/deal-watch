@@ -6,7 +6,7 @@ Watch Gmail for promotion emails from user-chosen senders (domain or full email)
 
 MVP is single-user; future non-tech users via per-copy deployment.
 
-T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c done (rule CRUD + `/cancel` everywhere) + T5-d done (interval/status/help + `setMyCommands` menu) + T5-e done (`T5-TestingPlan.md` + `TestT5.gs`); T6 suggestion done via a Telegram Mini App (`/setai` Settings + `[Need ideas?]` Ideas view) — T6-a…T6-m done; T7–T8 planned (see Build plan).
+T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c done (rule CRUD + `/cancel` everywhere) + T5-d done (interval/status/help + `setMyCommands` menu) + T5-e done (`T5-TestingPlan.md` + `TestT5.gs`); T6 suggestion done via a Telegram Mini App (`/setai` Settings + `[Need ideas?]` Ideas view) — T6-a…T6-m done; T7 done (static site + README, English-first with `/zh-Hant/` reserved); T8 planned (see Build plan).
 
 Architecture below is the intended design unless the user changes it.
 Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
@@ -66,7 +66,7 @@ Stack:
   - Telegram-only setup is impossible (OAuth consent, Web App deploy, trigger creation require Google UI).
 
 - Distribution:
-  - `copy` link + setup guide live in `README.md` and bilingual static site `docs/index.html` (GitHub Pages, placeholder links until owner supplies real URLs).
+  - `copy` link + setup guide live in `README.md` and a static site under `docs/` (GitHub Pages, relative paths, `main` + `/docs`). English-only pages at the root (`index/setup/usage/faq.html`); `/zh-Hant/` is reserved for a future Chinese mirror. Template distribution uses the public Sheet share link (`.../edit?usp=sharing`, in `docs/setup.html` + `README.md`) plus an instruction to use **File &gt; Make a copy**; the `/copy` URL is deliberately not used (it lands on a bare Google page that reads as suspicious). Site and repository URLs are hardcoded (`https://carmenchancky.github.io/deal-watch/`, `https://github.com/CarmenChanCKY/deal-watch`); no placeholder tokens remain. Screenshot figures use a single `assets/img/placeholder.svg` until real images land. Social preview uses `assets/img/og.png` (1200x630, generated from `og.svg`); the home hero reuses the Usage digest screenshot. License: MIT (`LICENSE`, `Copyright (c) 2026 Carmen Chan`).
   - The copy link is never shown inside Telegram (own bot does not exist until after copy/deploy).
 
 ## Data and storage
@@ -178,8 +178,8 @@ Stack:
   - T6-l (done): mobile viewport fix — Apps Script ignores meta tags in the HTML file, so `serveMiniApp_`/`serveMiniAppError_` inject the viewport via `HtmlOutput.addMetaTag` (`MINI_APP_VIEWPORT`); the inline `<meta name="viewport">` in `MiniApp.html` was removed. Fixes tiny/desktop-scaled rendering on phones.
   - T6-m (done): desktop/web framing fix — `serveMiniApp_`/`serveMiniAppError_` set `XFrameOptionsMode.ALLOWALL`, so Telegram Desktop/Web (which load the Mini App in a frame) display it instead of the browser's `xframe-neterror-page`; the minted token + owner check remains the guard.
 
-- T7 — Static site + README:
-  Bilingual `docs/index.html` + minimal README with `copy` link; BotFather -> copy -> Setup -> bind guide.
+- T7 — Static site + README (done):
+  Four vanilla pages under `docs/` — `index.html` (hero with a shared digest screenshot + a four-step "how it works" + prerequisites; feature cards in a 2x2 grid), `setup.html` (BotFather -> copy template -> deploy Web App -> Setup -> bind -> test), `usage.html` (commands, rules, keywords, senders, limits, interval, status/errors, digest, optional keyword ideas, maintenance), `faq.html` (8 common questions with a top table of contents and card + icon layout) — plus shared `assets/css/style.css`, `assets/js/site.js` (hamburger nav toggle + copy-to-clipboard), `assets/img/placeholder.svg` + `favicon.svg` + `og.svg`/`og.png` (1200x630 social card), and `docs/.nojekyll`; light theme, system fonts, no build, no framework, no CDN, relative paths. Mobile nav collapses behind a right-aligned hamburger (GitHub icon stays visible). Footer carries `© 2026 Carmen Chan`. `README.md` rewritten as a short intro + copy link + site link. `LICENSE` (MIT). English-only now; `/zh-Hant/` reserved (no language switch shown yet). Deferred to the owner: real screenshots (phone first; desktop allowed when no mobile version exists) and real URLs for the placeholder tokens.
 
 - T8 — Self-verification (user):
   Add rule -> test mail -> digest -> error/transfer check; AI provides steps only, never runs app/tests.
