@@ -1,30 +1,48 @@
 # Deal Watch
 
-Watch Gmail for promotion emails from senders you choose that contain keywords you choose, and get one Telegram digest per check.
+Get a Telegram message when a promotion email that matches your keywords lands in your Gmail inbox.
+
+![Deal Watch digest on Telegram](docs/assets/img/og.png)
 
 Everything runs inside your own Google account. No server, no database, no third-party service, and no shared bot: you deploy your own copy, so your keys stay yours.
 
+## What it does
+
+- **Watch chosen senders** — a whole domain (`xxx.com`) or one address (`abc@xxx.com`).
+- **Match your keywords** — comma-separated keywords work as OR; wrap a phrase in `"quotes"` to match it exactly.
+- **One digest per check** — matches grouped per thread with subject, date, and a link. Nothing found means no message.
+- **Button-first Telegram** — add rules, change the check interval, and read status by tapping buttons.
+- **Optional keyword ideas** — with an OpenRouter key, a Mini App suggests keywords for a topic you type. It never reads your email.
+
 ## Get started
 
-Setup guide: https://carmenchancky.github.io/deal-watch/
-
-Open the template: https://docs.google.com/spreadsheets/d/1pNb1TCxCix7ublIMJN-R3xNJn_6sjlU_rzRanuQFDno/edit?usp=sharing then choose **File > Make a copy**.
-
-Full documentation lives in the static site under [`docs/`](docs/): Setup, Usage, and FAQ.
-
-## Quick summary
-
 1. Create a bot in BotFather and copy its token.
-2. Open the template above and make a copy (**File > Make a copy**).
-3. Deploy the Web App from the Sheet's script editor.
-4. Run **Deal Watch > Setup** and paste the token and the `/exec` URL.
-5. Open the bind link in Telegram to connect your account.
+2. Copy the Sheet template and deploy the Web App.
+3. Run **Deal Watch > Setup**, paste the token and `/exec` URL, then open the bind link in Telegram.
 
-Then use `/add` to create rules and `/interval` to set how often Gmail is checked.
+**[Setup guide](https://carmenchancky.github.io/deal-watch/setup.html)** · **[Open the template](https://docs.google.com/spreadsheets/d/1pNb1TCxCix7ublIMJN-R3xNJn_6sjlU_rzRanuQFDno/edit?usp=sharing)** (then **File > Make a copy**).
+
+## Documentation
+
+- [Setup](https://carmenchancky.github.io/deal-watch/setup.html)
+- [Usage](https://carmenchancky.github.io/deal-watch/usage.html)
+- [FAQ](https://carmenchancky.github.io/deal-watch/faq.html)
+- [Changelog](CHANGELOG.md)
 
 ## Updates
 
-Each copy is yours alone, so Deal Watch never updates itself: your `/status` shows your version and flags when a
-newer release exists, and you replace the code in your own script by hand. Steps are in
-[Updating](https://carmenchancky.github.io/deal-watch/usage.html#updating); changes are listed in
-[CHANGELOG.md](CHANGELOG.md). Watch the repository's releases to be notified.
+Deal Watch never updates itself: each copy is yours alone. When a newer release exists, `/status` and the next digest flag it, and you replace the code by hand — see [Updating](https://carmenchancky.github.io/deal-watch/usage.html#updating). Watch this repository's **Releases** to be notified.
+
+## How it works
+
+- **Stack:** Google Apps Script bound to a Google Sheet (`GmailApp`, `SpreadsheetApp`, `PropertiesService`, `CacheService`, `UrlFetchApp`). No server, no database.
+- **Flow:** Telegram ↔ Apps Script ↔ hidden Sheet ↔ Gmail → Telegram Bot API → your phone.
+- **Layout:** `src/` (the Apps Script), `docs/` (static site), `test/` (acceptance plans), `version.txt` + `CHANGELOG.md` (releases).
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+## License
+
+MIT — see [LICENSE](LICENSE). © 2026 Carmen Chan.
