@@ -21,3 +21,10 @@ Full documentation lives in the static site under [`docs/`](docs/): Setup, Usage
 5. Open the bind link in Telegram to connect your account.
 
 Then use `/add` to create rules and `/interval` to set how often Gmail is checked.
+
+## Updates
+
+Each copy is yours alone, so Deal Watch never updates itself: your `/status` shows your version and flags when a
+newer release exists, and you replace the code in your own script by hand. Steps are in
+[Updating](https://carmenchancky.github.io/deal-watch/usage.html#updating); changes are listed in
+[CHANGELOG.md](CHANGELOG.md). Watch the repository's releases to be notified.

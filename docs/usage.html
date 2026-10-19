@@ -174,8 +174,8 @@
       </figure>
 
       <h2>Status and errors</h2>
-      <p><code>/status</code> shows the interval, how many rules you have, when the last check ran, and the last error
-        if there was one.</p>
+      <p><code>/status</code> shows the interval, how many rules you have, your version, when the last check ran, and the
+        last error if there was one.</p>
       <ul>
         <li>If a check finds nothing, you get no message.</li>
         <li>If a send fails, the error is included in your next digest so you are not left guessing.</li>
@@ -227,6 +227,29 @@
           message is deleted right after.</li>
         <li>Your rules and history survive all of the above, because they live in your Sheet, not in Telegram.</li>
       </ul>
+
+      <h2 id="updating">Updating</h2>
+      <p>Deal Watch does not update itself. Each copy is yours alone, so newer code never reaches you automatically. When
+        a newer release exists, you will see an update notice on your next digest and in <code>/status</code>.</p>
+      <p>To update, replace the code in your own copy:</p>
+      <ol>
+        <li>Open your Sheet, then <strong>Extensions &gt; Apps Script</strong>.</li>
+        <li>Replace <code>Code.gs</code> and <code>MiniApp.html</code> with the latest versions from the <a
+            target="_blank" rel="noopener" href="https://github.com/CarmenChanCKY/deal-watch">GitHub repository</a>, then
+          click <strong>Save</strong>.</li>
+        <li>Deploy the change: <strong>Deploy &gt; Manage deployments</strong>, edit the active deployment, set
+          <strong>Version</strong> to <strong>New version</strong>, then click <strong>Deploy</strong>.</li>
+        <li>If the update asked for new permissions, run <strong>Deal Watch &gt; Setup</strong> once and approve them.
+        </li>
+      </ol>
+      <div class="callout warn">
+        <strong>Do not re-copy the Sheet.</strong>
+        <p>Making a fresh copy would give you a new, empty Sheet and you would lose your rules, history, and settings.
+          Update the code only, as above.</p>
+      </div>
+      <p>To hear about new releases, open the repository and choose <strong>Watch &gt; Custom &gt; Releases</strong>. The
+        full list of changes is in the <a target="_blank" rel="noopener"
+          href="https://github.com/CarmenChanCKY/deal-watch/blob/main/CHANGELOG.md">changelog</a>.</p>
 
       <div class="callout">
         <strong>Something not working?</strong>

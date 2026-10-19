@@ -15,6 +15,7 @@
  * - T6-c: keyword ideas ([Need ideas?] opens Mini App Ideas; topic_hint on confirm).
  * - T6-d: Mini App plumbing (bot-issued open token + doGet HTML route + smoke).
  * - T6-i: single /setai opens Mini App Settings; legacy inline pickers removed.
+ * - T9: version in /status + "update available" notice on the digest.
  *
  * Conventions follow CONTEXT.md:
  * - Rules: id | sender | keywords (OR, comma) | enabled | topic_hint | updated_at
@@ -123,6 +124,17 @@ const MS_PER_DAY = 86400000;
 const LOCK_WAIT_MS = 5000;
 const TOKEN_MIN_LEN = 20;
 const SETUP_TOKEN_LEN = 32;
+
+// T9 — version + update notice. Per-copy distribution has no auto-update, so
+// the app shows SCRIPT_VERSION in /status and appends an "update available"
+// line to the digest while a newer version.txt exists upstream. Best-effort:
+// any fetch/parse failure is silent and never affects the watch run.
+const SCRIPT_VERSION = '1.0.0';
+const LATEST_VERSION_URL = 'https://raw.githubusercontent.com/CarmenChanCKY/deal-watch/main/version.txt';
+// Strict semver shape; anything else is treated as "no version known".
+const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
+const PROP_UPDATE_CHECKED_AT = 'update_checked_at';
+const PROP_UPDATE_LATEST_VERSION = 'update_latest_version';
 
 // ---------------------------------------------------------------------------
 // Shared Util (pure, no IO; Telegram fetch/redact/truncate/error centralised)
@@ -1566,8 +1578,10 @@ function updateLastRunsRow_(sent, errorSuffix) {
 /**
  * Build one merged message (pure, no IO).
  * Digest (any language) + English error block; "" when nothing to send.
+ * A non-empty updateNotice is appended last (before truncation); it never
+ * creates a message on its own, so zero-match runs stay silent.
  */
-function buildMergedMessage_(digest, errorParts) {
+function buildMergedMessage_(digest, errorParts, updateNotice) {
   const d = digest === null || digest === undefined ? '' : String(digest);
   const errs = [];
   if (errorParts && errorParts.length) {
@@ -1588,6 +1602,10 @@ function buildMergedMessage_(digest, errorParts) {
     out = d;
   } else {
     out = 'Deal Watch note:\n' + errs.join(' ');
+  }
+  const notice = trim_(updateNotice);
+  if (notice) {
+    out = out + '\n\n' + notice;
   }
   if (out.length > TELEGRAM_MAX_TEXT) {
     out = out.substring(0, TELEGRAM_MAX_TEXT - TELEGRAM_TRUNCATE_RESERVE) + '... (truncated)';
@@ -5006,6 +5024,115 @@ function readLastRunsSummary_() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// T9 — version + update notice. Version truth is a public version.txt in the
+// repo, read at most once a day and cached in ScriptProperties. Failures are
+// silent; the notice only ever rides an already-sent digest, so zero-match
+// runs stay silent and the one-message-per-run rule holds.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a strict x.y.z version into a comparable number; null when invalid.
+ * Pure, Never throws.
+ */
+function parseVersion_(s) {
+  const v = trim_(s);
+  if (!VERSION_PATTERN.test(v)) {
+    return null;
+  }
+  const parts = v.split('.');
+  return parseInt(parts[0], 10) * 1000000 + parseInt(parts[1], 10) * 1000 + parseInt(parts[2], 10);
+}
+
+/**
+ * Is remote strictly newer than local? false when either is unparsable.
+ * Pure, Never throws.
+ */
+function isUpdateAvailable_(local, remote) {
+  const l = parseVersion_(local);
+  const r = parseVersion_(remote);
+  if (l === null || r === null) {
+    return false;
+  }
+  return r > l;
+}
+
+/**
+ * Fetch the latest version string from LATEST_VERSION_URL.
+ * Returns '' on any non-2xx / invalid / network failure. Never throws.
+ */
+function fetchLatestVersion_() {
+  try {
+    const resp = UrlFetchApp.fetch(LATEST_VERSION_URL, { muteHttpExceptions: true });
+    if (!resp) {
+      return '';
+    }
+    const code = resp.getResponseCode();
+    if (code < HTTP_OK_MIN || code >= HTTP_OK_MAX) {
+      return '';
+    }
+    const v = trim_(resp.getContentText());
+    return VERSION_PATTERN.test(v) ? v : '';
+  } catch (e) {
+    // Network / parse failure is silent — version info is best-effort only.
+    return '';
+  }
+}
+
+/**
+ * Update-notice line for a known latest version, or '' when up to date.
+ * Pure, Never throws.
+ */
+function formatUpdateNotice_(latest) {
+  const v = trim_(latest);
+  if (!isUpdateAvailable_(SCRIPT_VERSION, v)) {
+    return '';
+  }
+  return 'Deal Watch ' + v + ' is available (you have ' + SCRIPT_VERSION + '). See the changelog to update.';
+}
+
+/**
+ * Throttled (once/day) upstream check; caches the latest version and returns
+ * an update-notice line ('' when up to date/unavailable). Never throws.
+ */
+function maybeCheckForUpdate_() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const lastChecked = parseInt(String(props.getProperty(PROP_UPDATE_CHECKED_AT) || ''), 10);
+    const now = new Date().getTime();
+    let latest = trim_(props.getProperty(PROP_UPDATE_LATEST_VERSION));
+    const due = !(lastChecked > 0) || (now - lastChecked) >= MS_PER_DAY;
+    if (due) {
+      const fetched = fetchLatestVersion_();
+      if (fetched) {
+        latest = fetched;
+        props.setProperty(PROP_UPDATE_LATEST_VERSION, fetched);
+      }
+      props.setProperty(PROP_UPDATE_CHECKED_AT, String(now));
+    }
+    return formatUpdateNotice_(latest);
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * "Version: x.y.z" line for /status, with "(update available: a.b.c)" when the
+ * cached latest is newer. Reads the cache only (no network). Never throws.
+ */
+function getStatusVersionLine_() {
+  let latest = '';
+  try {
+    latest = trim_(PropertiesService.getScriptProperties().getProperty(PROP_UPDATE_LATEST_VERSION));
+  } catch (e) {
+    latest = '';
+  }
+  if (isUpdateAvailable_(SCRIPT_VERSION, latest)) {
+    return 'Version: ' + SCRIPT_VERSION + ' (update available: ' + latest + ')';
+  }
+  return 'Version: ' + SCRIPT_VERSION;
+}
+
 /**
  * Show watcher status (interval + rules + last run + error) — Never throws.
  */
@@ -5025,6 +5152,7 @@ function handleStatus_(token, chatId) {
     'Interval: every ' + formatIntervalLabel_(interval),
     'Rules: ' + rules.length + ' (' + enabled + ' enabled)',
     'Last run: ' + (last && last.when ? last.when + ' (found ' + (last.found || '0') + ', sent ' + (last.sent || '0') + ')' : 'none yet'),
+    getStatusVersionLine_(),
     'Suggestions: ' + (isSuggestionEnabled_() ? 'on' : 'off'),
     'Model: ' + currentModelLabel_(),
     'Error: ' + (pending || 'none')
@@ -5143,11 +5271,14 @@ function runWatchAndNotify() {
       }
     }
     const errorParts = collectWatchErrorParts_(pendingBefore, currentError, jam);
+    // Update notice: throttled check (once/day); result only rides an
+    // already-sent digest, so it never forces a message on its own.
+    const updateNotice = maybeCheckForUpdate_();
     if (hasNothingToSend_(digest, errorParts)) {
       // Silent: zero-match with no pending/current/jam errors — nothing to send.
       return '';
     }
-    const toSend = buildMergedMessage_(digest, errorParts);
+    const toSend = buildMergedMessage_(digest, errorParts, updateNotice);
     if (!toSend) {
       // Silent: merged message collapsed to empty — nothing to send.
       return '';

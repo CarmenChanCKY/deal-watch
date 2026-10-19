@@ -6,7 +6,7 @@ Watch Gmail for promotion emails from user-chosen senders (domain or full email)
 
 MVP is single-user; future non-tech users via per-copy deployment.
 
-T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c done (rule CRUD + `/cancel` everywhere) + T5-d done (interval/status/help + `setMyCommands` menu) + T5-e done (`T5-TestingPlan.md` + `TestT5.gs`); T6 suggestion done via a Telegram Mini App (`/setai` Settings + `[Need ideas?]` Ideas view) — T6-a…T6-m done; T7 done (static site + README, English-first with `/zh-Hant/` reserved); T8 planned (see Build plan).
+T3 core done (`src/Code.gs` + `src/appsscript.json`) with reusable acceptance tests (`test/`); T4 trigger + self-monitoring done (with reusable acceptance tests); T5-a/b done (`doPost` router + auth gate, Sheet Setup + `/start` bind + `/transfer` + `/connect`, rules mirror cache); T5-c done (rule CRUD + `/cancel` everywhere) + T5-d done (interval/status/help + `setMyCommands` menu) + T5-e done (`T5-TestingPlan.md` + `TestT5.gs`); T6 suggestion done via a Telegram Mini App (`/setai` Settings + `[Need ideas?]` Ideas view) — T6-a…T6-m done; T7 done (static site + README, English-first with `/zh-Hant/` reserved); T8 planned (see Build plan); T9 done (version in `/status` + digest update notice; manual update flow).
 
 Architecture below is the intended design unless the user changes it.
 Do not replace locked decisions on personal preference; if implementation conflicts with one, explain before changing it.
@@ -68,6 +68,7 @@ Stack:
 - Distribution:
   - `copy` link + setup guide live in `README.md` and a static site under `docs/` (GitHub Pages, relative paths, `main` + `/docs`). English-only pages at the root (`index/setup/usage/faq.html`); `/zh-Hant/` is reserved for a future Chinese mirror. Template distribution uses the public Sheet share link (`.../edit?usp=sharing`, in `docs/setup.html` + `README.md`) plus an instruction to use **File &gt; Make a copy**; the `/copy` URL is deliberately not used (it lands on a bare Google page that reads as suspicious). Site and repository URLs are hardcoded (`https://carmenchancky.github.io/deal-watch/`, `https://github.com/CarmenChanCKY/deal-watch`); no placeholder tokens remain. Screenshot figures use a single `assets/img/placeholder.svg` until real images land. Social preview uses `assets/img/og.png` (1200x630, generated from `og.svg`); the home hero reuses the Usage digest screenshot. License: MIT (`LICENSE`, `Copyright (c) 2026 Carmen Chan`).
   - The copy link is never shown inside Telegram (own bot does not exist until after copy/deploy).
+  - Updates are manual (no auto-update): `SCRIPT_VERSION` shows in `/status` and a throttled once-a-day check appends an "update available" line to the digest (never a message on its own) while a newer `version.txt` exists. `CHANGELOG.md` + GitHub Releases are the announcement channel.
 
 ## Data and storage
 
@@ -183,6 +184,9 @@ Stack:
 
 - T8 — Self-verification (user):
   Add rule -> test mail -> digest -> error/transfer check; AI provides steps only, never runs app/tests.
+
+- T9 — Version + update notice (done):
+  `SCRIPT_VERSION` in Config + `version.txt` upstream; `SCRIPT_VERSION` shown in `/status`; a throttled (once/day) fetch of `version.txt` caches the latest in `ScriptProperties` and appends an "update available" line to the digest (never a message on its own). Failures are silent (never counted in `Runs`). Docs: `docs/usage.html` Updating section, `CHANGELOG.md`, GitHub Releases.
 
 ## Explicitly rejected (with reasons)
 

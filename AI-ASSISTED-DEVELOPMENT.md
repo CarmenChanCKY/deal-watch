@@ -890,3 +890,25 @@ A second incident compounded it: the `deleteWebhook?drop_pending_updates=true` c
 **Result.** Owner reviews locally and, after pushing, enables Pages. `CONTEXT.md` and the T7 entry updated.
 
 
+## 46. T9 version display + update notice (per-copy distribution)
+
+**Problem.** Every user copies their own bound script, so a bug fix in the template never reaches existing copies. There is no central push, and asking non-technical users to re-paste code leaves them silently running old versions. The owner wanted to know whether a one-shot update was possible and, if not, how such projects normally handle updates.
+
+**Options considered.** Marketplace Add-on (true auto-update, but needs OAuth verification plus a CASA security assessment for the restricted Gmail scope, and would replace the entire Telegram UX); central service (auto-update but breaks per-copy key isolation — already rejected); Apps Script Library (consumers still bump the version by hand; no auto-update for view-access users); keep per-copy and add a detect-and-notify layer. Given the repo is public but unpromoted — so likely very few users — the owner chose the lowest-cost option.
+
+**How AI was used.** AI researched the actual Apps Script update mechanics (library version pinning, development mode limited to editors, the unreliable `stable` manifest value) to correct the assumption that a library gives a one-shot update, then laid out the four distribution models and mapped them to the project's isolation constraint. AI scoped the chosen design, proposed the notify surfaces, and flagged the one choice that collides with a locked invariant (a separate update message would break "one message per run" / `Runs.sent 0/1`).
+
+**Decision.** Level 1 + Level 2, notice folded into the digest (option A) plus `/status`, no separate message and no context-invariant change:
+- `src/Code.gs` Config: `SCRIPT_VERSION = '1.0.0'`, `LATEST_VERSION_URL`, `VERSION_PATTERN`, `PROP_UPDATE_CHECKED_AT`, `PROP_UPDATE_LATEST_VERSION`.
+- Helpers `parseVersion_` / `isUpdateAvailable_` (pure), `fetchLatestVersion_` (raw fetch, silent on failure), `formatUpdateNotice_`, `maybeCheckForUpdate_` (throttled once per `MS_PER_DAY`, caches latest), `getStatusVersionLine_`.
+- `buildMergedMessage_` gains an optional `updateNotice` appended before truncation; it never creates a message on its own, so zero-match runs stay silent.
+- `runWatchAndNotify` calls the throttled check before the "nothing to send" guard and passes the notice through.
+- `handleStatus_` shows `Version: x.y.z` and `(update available: a.b.c)` from cache.
+- New `version.txt` + `CHANGELOG.md`; docs Updating section in `usage.html` (and a Setup cross-link), README Updates section.
+
+**Why.** A digest-only notice keeps the one-message-per-run rule and adds no trace to `Runs`/`Log`; caching the version in `ScriptProperties` makes `/status` offline. Manual is the honest reality of per-copy distribution, so the design only detects and advertises rather than pretending to auto-update.
+
+**Result.** Owner-run verification: `/status` shows the version; editing `version.txt` to a higher value (without touching code) makes the next digest carry the notice and `/status` show the update; offline runs are unchanged and silent. Release checklist: bump `SCRIPT_VERSION` and `version.txt` together, add a `CHANGELOG.md` entry, sync the template Sheet's bound script, and open a GitHub Release.
+
+
+
